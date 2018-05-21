@@ -59,6 +59,7 @@ public class JavaPowerIterationClusteringExample {
                 RowFactory.create(3L, Arrays.asList(4L), Arrays.asList(0.1)),
                 RowFactory.create(4L, Arrays.asList(5L), Arrays.asList(0.9))
         );
+
         StructType schema = new StructType(new StructField[]{
                 new StructField("id", DataTypes.LongType, false, Metadata.empty()),
                 new StructField("neighbors", DataTypes.createArrayType(DataTypes.LongType, false), false, Metadata.empty()),
