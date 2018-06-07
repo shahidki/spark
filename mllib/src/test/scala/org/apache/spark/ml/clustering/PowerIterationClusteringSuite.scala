@@ -17,13 +17,14 @@
 
 package org.apache.spark.ml.clustering
 
+import scala.collection.mutable
+
 import org.apache.spark.{SparkException, SparkFunSuite}
 import org.apache.spark.ml.util.DefaultReadWriteTest
 import org.apache.spark.mllib.util.MLlibTestSparkContext
-import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, lit}
 import org.apache.spark.sql.types._
-
 
 class PowerIterationClusteringSuite extends SparkFunSuite
   with MLlibTestSparkContext with DefaultReadWriteTest {
@@ -78,10 +79,15 @@ class PowerIterationClusteringSuite extends SparkFunSuite
       .assignClusters(data)
     val localAssignments = assignments
       .select('id, 'cluster)
-      .as[(Long, Int)].collect().toSet
-    val expectedResult = (0 until n1).map(x => (x, 1)).toSet ++
-      (n1 until n).map(x => (x, 0)).toSet
-    assert(localAssignments === expectedResult)
+      .collect()
+
+    val predictions = Array.fill(2)(mutable.Set.empty[Long])
+    localAssignments.foreach {
+      case Row(id: Long, cluster: Integer) => predictions(cluster) += id
+    }
+
+    val expectedResult = Set((0 until n1).toSet, (n1 until n).toSet)
+    assert(predictions.toSet == expectedResult)
 
     val assignments2 = new PowerIterationClustering()
       .setK(2)
@@ -91,8 +97,14 @@ class PowerIterationClusteringSuite extends SparkFunSuite
       .assignClusters(data)
     val localAssignments2 = assignments2
       .select('id, 'cluster)
-      .as[(Long, Int)].collect().toSet
-    assert(localAssignments2 === expectedResult)
+      .collect()
+
+    val predictions2 = Array.fill(2)(mutable.Set.empty[Long])
+    localAssignments2.foreach {
+      case Row(id: Long, cluster: Integer) => predictions2(cluster) += id
+    }
+    assert(predictions2.toSet == expectedResult)
+
   }
 
   test("supported input types") {
@@ -136,7 +148,12 @@ class PowerIterationClusteringSuite extends SparkFunSuite
   }
 
   test("test default weight") {
-    val dataWithoutWeight = data.sample(0.5, 1L).select('src, 'dst)
+    val dataWithoutWeight = spark.createDataFrame(Seq(
+      (0, 1),
+      (0, 2),
+      (1, 2),
+      (3, 4)
+    )).toDF("src", "dst")
 
     val assignments = new PowerIterationClustering()
       .setK(2)
