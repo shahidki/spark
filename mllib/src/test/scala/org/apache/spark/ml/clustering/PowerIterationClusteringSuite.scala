@@ -148,12 +148,7 @@ class PowerIterationClusteringSuite extends SparkFunSuite
   }
 
   test("test default weight") {
-    val dataWithoutWeight = spark.createDataFrame(Seq(
-      (0, 1),
-      (0, 2),
-      (1, 2),
-      (3, 4)
-    )).toDF("src", "dst")
+    val dataWithoutWeight = data.sample(0.5, 1L).select('src, 'dst)
 
     val assignments = new PowerIterationClustering()
       .setK(2)
