@@ -836,7 +836,7 @@ private[ui] class TaskPagedTable(
       <td>{if (task.speculative) s"${task.attempt} (speculative)" else task.attempt.toString}</td>
       <td>{task.status}</td>
       <td>{task.taskLocality}</td>
-      <td>{task.executorId}</td>
+      <td>{task.executorId.toInt}</td>
       <td>
         <div style="float: left">{task.host}</div>
         <div style="float: right">

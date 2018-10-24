@@ -93,7 +93,7 @@ private[ui] class ExecutorTable(stage: StageData, store: AppStatusStore) {
       val executor = store.asOption(store.executorSummary(k))
       <tr>
         <td>
-          <div style="float: left">{k}</div>
+          <div style="float: left">{k.toInt}</div>
           <div style="float: right">
           {
             executor.map(_.executorLogs).getOrElse(Map.empty).map {
