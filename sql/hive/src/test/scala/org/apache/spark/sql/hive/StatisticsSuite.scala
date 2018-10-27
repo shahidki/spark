@@ -764,8 +764,8 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
       val rawDataSize = extractStatsPropValues(describeResult, "rawDataSize")
       val numRows = extractStatsPropValues(describeResult, "numRows")
       val totalSize = extractStatsPropValues(describeResult, "totalSize")
-      assert(rawDataSize.isEmpty, "rawDataSize should not be shown without table analysis")
-      assert(numRows.isEmpty, "numRows should not be shown without table analysis")
+      assert(rawDataSize.get == -1, "rawDataSize should not be shown without table analysis")
+      assert(numRows.get == -1, "numRows should not be shown without table analysis")
       assert(totalSize.isDefined && totalSize.get > 0, "totalSize is lost")
     }
   }
