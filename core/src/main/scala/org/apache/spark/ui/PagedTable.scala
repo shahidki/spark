@@ -52,12 +52,11 @@ private[spark] abstract class PagedDataSource[T](val pageSize: Int) {
    */
   def pageData(page: Int): PageData[T] = {
     val totalPages = (dataSize + pageSize - 1) / pageSize
-    if (page <= 0 || page > totalPages) {
-      throw new IndexOutOfBoundsException(
-        s"Page $page is out of range. Please select a page number between 1 and $totalPages.")
+    val (from, to) = if (page <= 0 || page > totalPages) {
+      (0, dataSize.min(pageSize))
+    } else {
+      ((page - 1) * pageSize, dataSize.min(page * pageSize))
     }
-    val from = (page - 1) * pageSize
-    val to = dataSize.min(page * pageSize)
     PageData(totalPages, sliceData(from, to))
   }
 
