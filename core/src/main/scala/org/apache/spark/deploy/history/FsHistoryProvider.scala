@@ -128,6 +128,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private val pendingReplayTasksCount = new java.util.concurrent.atomic.AtomicInteger(0)
 
   private val storePath = conf.get(LOCAL_STORE_DIR).map(new File(_))
+  try {
+    Utils.chmod700(storePath.get)
+  } catch {
+    case _: Exception => logError(s"Failed to change the permission of the storePath $storePath")
+  }
   private val fastInProgressParsing = conf.get(FAST_IN_PROGRESS_PARSING)
 
   // Visible for testing.
