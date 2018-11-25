@@ -1150,7 +1150,7 @@ private[history] class AppListingListener(
 
     attempt.attemptId = event.appAttemptId
     attempt.startTime = new Date(event.time)
-    attempt.lastUpdated = new Date(clock.getTimeMillis())
+    attempt.lastUpdated = new Date(log.getModificationTime)
     attempt.sparkUser = event.sparkUser
 
     checkProgress()
