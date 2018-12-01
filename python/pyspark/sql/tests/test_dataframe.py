@@ -25,7 +25,7 @@ from pyspark.sql.types import *
 from pyspark.sql.utils import AnalysisException, IllegalArgumentException
 from pyspark.testing.sqlutils import ReusedSQLTestCase, SQLTestUtils, have_pyarrow, have_pandas, \
     pandas_requirement_message, pyarrow_requirement_message
-from pyspark.tests import QuietTest
+from pyspark.testing.utils import QuietTest
 
 
 class DataFrameTests(ReusedSQLTestCase):
@@ -374,6 +374,19 @@ class DataFrameTests(ReusedSQLTestCase):
 
         plan = df1.join(df2.hint("broadcast"), "id")._jdf.queryExecution().executedPlan()
         self.assertEqual(1, plan.toString().count("BroadcastHashJoin"))
+
+    # add tests for SPARK-23647 (test more types for hint)
+    def test_extended_hint_types(self):
+        from pyspark.sql import DataFrame
+
+        df = self.spark.range(10e10).toDF("id")
+        such_a_nice_list = ["itworks1", "itworks2", "itworks3"]
+        hinted_df = df.hint("my awesome hint", 1.2345, "what", such_a_nice_list)
+        logical_plan = hinted_df._jdf.queryExecution().logical()
+
+        self.assertEqual(1, logical_plan.toString().count("1.2345"))
+        self.assertEqual(1, logical_plan.toString().count("what"))
+        self.assertEqual(3, logical_plan.toString().count("itworks"))
 
     def test_sample(self):
         self.assertRaisesRegexp(
@@ -732,6 +745,7 @@ if __name__ == "__main__":
 
     try:
         import xmlrunner
-        unittest.main(testRunner=xmlrunner.XMLTestRunner(output='target/test-reports'), verbosity=2)
+        testRunner = xmlrunner.XMLTestRunner(output='target/test-reports')
     except ImportError:
-        unittest.main(verbosity=2)
+        testRunner = None
+    unittest.main(testRunner=testRunner, verbosity=2)
