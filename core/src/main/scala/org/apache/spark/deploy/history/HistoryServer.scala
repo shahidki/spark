@@ -18,14 +18,14 @@
 package org.apache.spark.deploy.history
 
 import java.util.NoSuchElementException
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipOutputStream
+
 import javax.servlet.http.{HttpServlet, HttpServletRequest, HttpServletResponse}
 
 import scala.util.control.NonFatal
 import scala.xml.Node
-
 import org.eclipse.jetty.servlet.{ServletContextHandler, ServletHolder}
-
 import org.apache.spark.{SecurityManager, SparkConf}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
@@ -35,7 +35,7 @@ import org.apache.spark.internal.config.UI._
 import org.apache.spark.status.api.v1.{ApiRootResource, ApplicationInfo, UIRoot}
 import org.apache.spark.ui.{SparkUI, UIUtils, WebUI}
 import org.apache.spark.ui.JettyUtils._
-import org.apache.spark.util.{ShutdownHookManager, SystemClock, Utils}
+import org.apache.spark.util.{ShutdownHookManager, SystemClock, ThreadUtils, Utils}
 
 /**
  * A web server that renders SparkUIs of completed applications.
@@ -271,6 +271,7 @@ object HistoryServer extends Logging {
     new HistoryServerArguments(conf, argStrings)
     initSecurity()
     val securityManager = createSecurityManager(conf)
+    val replayPool = ThreadUtils.newDaemonSingleThreadScheduledExecutor("history-replay")
 
     val providerName = conf.get(History.PROVIDER)
       .getOrElse(classOf[FsHistoryProvider].getName())
