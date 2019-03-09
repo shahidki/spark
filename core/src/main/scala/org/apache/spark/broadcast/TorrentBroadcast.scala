@@ -236,10 +236,12 @@ private[spark] class TorrentBroadcast[T: ClassTag](obj: T, id: Long)
               throw new SparkException(s"Failed to get locally stored broadcast data: $broadcastId")
             }
           case None =>
-            logInfo("Started reading broadcast variable " + id)
-            val startTimeMs = System.currentTimeMillis()
+            val estimatedTotalSize = Utils.bytesToString(numBlocks * blockSize)
+            logInfo(s"Started reading broadcast variable $id with $numBlocks pieces " +
+              s"(estimated total size $estimatedTotalSize)")
+            val startTimeNs = System.nanoTime()
             val blocks = readBlocks()
-            logInfo("Reading broadcast variable " + id + " took" + Utils.getUsedTimeMs(startTimeMs))
+            logInfo(s"Reading broadcast variable $id took ${Utils.getUsedTimeNs(startTimeNs)}")
 
             try {
               val obj = TorrentBroadcast.unBlockifyObject[T](

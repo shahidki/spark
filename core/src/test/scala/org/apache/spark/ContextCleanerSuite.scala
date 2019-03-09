@@ -18,6 +18,7 @@
 package org.apache.spark
 
 import java.lang.ref.WeakReference
+import java.util.concurrent.TimeUnit
 
 import scala.collection.mutable.HashSet
 import scala.language.existentials
@@ -29,10 +30,10 @@ import org.scalatest.concurrent.PatienceConfiguration
 import org.scalatest.time.SpanSugar._
 
 import org.apache.spark.internal.{config, Logging}
+import org.apache.spark.internal.config._
 import org.apache.spark.rdd.{RDD, ReliableRDDCheckpointData}
 import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.storage._
-import org.apache.spark.util.Utils
 
 /**
  * An abstract base class for context cleaner tests, which sets up a context with a config
@@ -46,9 +47,9 @@ abstract class ContextCleanerSuiteBase(val shuffleManager: Class[_] = classOf[So
   val conf = new SparkConf()
     .setMaster("local[2]")
     .setAppName("ContextCleanerSuite")
-    .set("spark.cleaner.referenceTracking.blocking", "true")
-    .set("spark.cleaner.referenceTracking.blocking.shuffle", "true")
-    .set("spark.cleaner.referenceTracking.cleanCheckpoints", "true")
+    .set(CLEANER_REFERENCE_TRACKING_BLOCKING, true)
+    .set(CLEANER_REFERENCE_TRACKING_BLOCKING_SHUFFLE, true)
+    .set(CLEANER_REFERENCE_TRACKING_CLEAN_CHECKPOINTS, true)
     .set(config.SHUFFLE_MANAGER, shuffleManager.getName)
 
   before {
@@ -98,10 +99,10 @@ abstract class ContextCleanerSuiteBase(val shuffleManager: Class[_] = classOf[So
   /** Run GC and make sure it actually has run */
   protected def runGC() {
     val weakRef = new WeakReference(new Object())
-    val startTime = System.currentTimeMillis
+    val startTimeNs = System.nanoTime()
     System.gc() // Make a best effort to run the garbage collection. It *usually* runs GC.
     // Wait until a weak reference object has been GCed
-    while (System.currentTimeMillis - startTime < 10000 && weakRef.get != null) {
+    while (System.nanoTime() - startTimeNs < TimeUnit.SECONDS.toNanos(10) && weakRef.get != null) {
       System.gc()
       Thread.sleep(200)
     }
@@ -234,7 +235,7 @@ class ContextCleanerSuite extends ContextCleanerSuiteBase {
       val conf = new SparkConf()
         .setMaster("local[2]")
         .setAppName("cleanupCheckpoint")
-        .set("spark.cleaner.referenceTracking.cleanCheckpoints", "false")
+        .set(CLEANER_REFERENCE_TRACKING_CLEAN_CHECKPOINTS, false)
       sc = new SparkContext(conf)
       rdd = newPairRDD()
       sc.setCheckpointDir(checkpointDir.toString)
@@ -317,8 +318,8 @@ class ContextCleanerSuite extends ContextCleanerSuiteBase {
     val conf2 = new SparkConf()
       .setMaster("local-cluster[2, 1, 1024]")
       .setAppName("ContextCleanerSuite")
-      .set("spark.cleaner.referenceTracking.blocking", "true")
-      .set("spark.cleaner.referenceTracking.blocking.shuffle", "true")
+      .set(CLEANER_REFERENCE_TRACKING_BLOCKING, true)
+      .set(CLEANER_REFERENCE_TRACKING_BLOCKING_SHUFFLE, true)
       .set(config.SHUFFLE_MANAGER, shuffleManager.getName)
     sc = new SparkContext(conf2)
 

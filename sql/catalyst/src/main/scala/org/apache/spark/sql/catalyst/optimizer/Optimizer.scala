@@ -38,10 +38,43 @@ import org.apache.spark.util.Utils
 abstract class Optimizer(sessionCatalog: SessionCatalog)
   extends RuleExecutor[LogicalPlan] {
 
-  // Check for structural integrity of the plan in test mode. Currently we only check if a plan is
-  // still resolved after the execution of each rule.
+  // Check for structural integrity of the plan in test mode.
+  // Currently we check after the execution of each rule if a plan:
+  // - is still resolved
+  // - only host special expressions in supported operators
   override protected def isPlanIntegral(plan: LogicalPlan): Boolean = {
-    !Utils.isTesting || plan.resolved
+    !Utils.isTesting || (plan.resolved && checkSpecialExpressionIntegrity(plan))
+  }
+
+  /**
+   * Check if all operators in this plan hold structural integrity with regards to hosting special
+   * expressions.
+   * Returns true when all operators are integral.
+   */
+  private def checkSpecialExpressionIntegrity(plan: LogicalPlan): Boolean = {
+    plan.find(specialExpressionInUnsupportedOperator).isEmpty
+  }
+
+  /**
+   * Check if there's any expression in this query plan operator that is
+   * - A WindowExpression but the plan is not Window
+   * - An AggregateExpresion but the plan is not Aggregate or Window
+   * - A Generator but the plan is not Generate
+   * Returns true when this operator breaks structural integrity with one of the cases above.
+   */
+  private def specialExpressionInUnsupportedOperator(plan: LogicalPlan): Boolean = {
+    val exprs = plan.expressions
+    exprs.flatMap { root =>
+      root.find {
+        case e: WindowExpression
+          if !plan.isInstanceOf[Window] => true
+        case e: AggregateExpression
+          if !(plan.isInstanceOf[Aggregate] || plan.isInstanceOf[Window]) => true
+        case e: Generator
+          if !plan.isInstanceOf[Generate] => true
+        case _ => false
+      }
+    }.nonEmpty
   }
 
   protected def fixedPoint = FixedPoint(SQLConf.get.optimizerMaxIterations)
@@ -62,6 +95,7 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
         EliminateOuterJoin,
         PushPredicateThroughJoin,
         PushDownPredicate,
+        PushDownLeftSemiAntiJoin,
         LimitPushDown,
         ColumnPruning,
         InferFiltersFromConstraints,
@@ -164,7 +198,8 @@ abstract class Optimizer(sessionCatalog: SessionCatalog)
       DecimalAggregates) :+
     Batch("Object Expressions Optimization", fixedPoint,
       EliminateMapObjects,
-      CombineTypedFilters) :+
+      CombineTypedFilters,
+      ObjectSerializerPruning) :+
     Batch("LocalRelation", fixedPoint,
       ConvertToLocalRelation,
       PropagateEmptyRelation) :+
@@ -560,11 +595,6 @@ object ColumnPruning extends Rule[LogicalPlan] {
     // Prunes the unused columns from child of `DeserializeToObject`
     case d @ DeserializeToObject(_, _, child) if !child.outputSet.subsetOf(d.references) =>
       d.copy(child = prunedChild(child, d.references))
-
-    case p @ Project(_, s: SerializeFromObject) if p.references != s.outputSet =>
-      val usedRefs = p.references
-      val prunedSerializer = s.serializer.filter(usedRefs.contains)
-      p.copy(child = SerializeFromObject(prunedSerializer, s.child))
 
     // Prunes the unused columns from child of Aggregate/Expand/Generate/ScriptTransformation
     case a @ Aggregate(_, _, child) if !child.outputSet.subsetOf(a.references) =>
@@ -983,24 +1013,13 @@ object PushDownPredicate extends Rule[LogicalPlan] with PredicateHelper {
     // This also applies to Aggregate.
     case Filter(condition, project @ Project(fields, grandChild))
       if fields.forall(_.deterministic) && canPushThroughCondition(grandChild, condition) =>
-
-      // Create a map of Aliases to their values from the child projection.
-      // e.g., 'SELECT a + b AS c, d ...' produces Map(c -> a + b).
-      val aliasMap = AttributeMap(fields.collect {
-        case a: Alias => (a.toAttribute, a.child)
-      })
-
+      val aliasMap = getAliasMap(project)
       project.copy(child = Filter(replaceAlias(condition, aliasMap), grandChild))
 
     case filter @ Filter(condition, aggregate: Aggregate)
       if aggregate.aggregateExpressions.forall(_.deterministic)
         && aggregate.groupingExpressions.nonEmpty =>
-      // Find all the aliased expressions in the aggregate list that don't include any actual
-      // AggregateExpression, and create a map from the alias to the expression
-      val aliasMap = AttributeMap(aggregate.aggregateExpressions.collect {
-        case a: Alias if a.child.find(_.isInstanceOf[AggregateExpression]).isEmpty =>
-          (a.toAttribute, a.child)
-      })
+      val aliasMap = getAliasMap(aggregate)
 
       // For each filter, expand the alias and check if the filter can be evaluated using
       // attributes produced by the aggregate operator's child operator.
@@ -1098,7 +1117,23 @@ object PushDownPredicate extends Rule[LogicalPlan] with PredicateHelper {
       }
   }
 
-  private def canPushThrough(p: UnaryNode): Boolean = p match {
+  def getAliasMap(plan: Project): AttributeMap[Expression] = {
+    // Create a map of Aliases to their values from the child projection.
+    // e.g., 'SELECT a + b AS c, d ...' produces Map(c -> a + b).
+    AttributeMap(plan.projectList.collect { case a: Alias => (a.toAttribute, a.child) })
+  }
+
+  def getAliasMap(plan: Aggregate): AttributeMap[Expression] = {
+    // Find all the aliased expressions in the aggregate list that don't include any actual
+    // AggregateExpression, and create a map from the alias to the expression
+    val aliasMap = plan.aggregateExpressions.collect {
+      case a: Alias if a.child.find(_.isInstanceOf[AggregateExpression]).isEmpty =>
+        (a.toAttribute, a.child)
+    }
+    AttributeMap(aliasMap)
+  }
+
+  def canPushThrough(p: UnaryNode): Boolean = p match {
     // Note that some operators (e.g. project, aggregate, union) are being handled separately
     // (earlier in this rule).
     case _: AppendColumns => true

@@ -25,6 +25,7 @@ import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 
 import org.apache.spark.SparkContext
+import org.apache.spark.internal.config.SPECULATION_ENABLED
 import org.apache.spark.sql.SaveMode
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.sources.v2.reader._
@@ -37,8 +38,7 @@ import org.apache.spark.util.SerializableConfiguration
  * Each task writes data to `target/_temporary/uniqueId/$jobId-$partitionId-$attemptNumber`.
  * Each job moves files from `target/_temporary/uniqueId/` to `target`.
  */
-class SimpleWritableDataSource extends DataSourceV2
-  with TableProvider with SessionConfigSupport {
+class SimpleWritableDataSource extends TableProvider with SessionConfigSupport {
 
   private val tableSchema = new StructType().add("i", "long").add("j", "long")
 

@@ -36,6 +36,7 @@ import org.apache.spark.Partitioner._
 import org.apache.spark.annotation.{DeveloperApi, Experimental, Since}
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.internal.Logging
+import org.apache.spark.internal.config._
 import org.apache.spark.internal.config.RDD_LIMIT_SCALE_UP_FACTOR
 import org.apache.spark.partial.BoundedDouble
 import org.apache.spark.partial.CountEvaluator
@@ -211,11 +212,11 @@ abstract class RDD[T: ClassTag](
   /**
    * Mark the RDD as non-persistent, and remove all blocks for it from memory and disk.
    *
-   * @param blocking Whether to block until all blocks are deleted.
+   * @param blocking Whether to block until all blocks are deleted (default: false)
    * @return This RDD.
    */
-  def unpersist(blocking: Boolean = true): this.type = {
-    logInfo("Removing RDD " + id + " from persistence list")
+  def unpersist(blocking: Boolean = false): this.type = {
+    logInfo(s"Removing RDD $id from persistence list")
     sc.unpersistRDD(id, blocking)
     storageLevel = StorageLevel.NONE
     this
@@ -1491,45 +1492,21 @@ abstract class RDD[T: ClassTag](
    * Save this RDD as a text file, using string representations of elements.
    */
   def saveAsTextFile(path: String): Unit = withScope {
-    // https://issues.apache.org/jira/browse/SPARK-2075
-    //
-    // NullWritable is a `Comparable` in Hadoop 1.+, so the compiler cannot find an implicit
-    // Ordering for it and will use the default `null`. However, it's a `Comparable[NullWritable]`
-    // in Hadoop 2.+, so the compiler will call the implicit `Ordering.ordered` method to create an
-    // Ordering for `NullWritable`. That's why the compiler will generate different anonymous
-    // classes for `saveAsTextFile` in Hadoop 1.+ and Hadoop 2.+.
-    //
-    // Therefore, here we provide an explicit Ordering `null` to make sure the compiler generate
-    // same bytecodes for `saveAsTextFile`.
-    val nullWritableClassTag = implicitly[ClassTag[NullWritable]]
-    val textClassTag = implicitly[ClassTag[Text]]
-    val r = this.mapPartitions { iter =>
-      val text = new Text()
-      iter.map { x =>
-        text.set(x.toString)
-        (NullWritable.get(), text)
-      }
-    }
-    RDD.rddToPairRDDFunctions(r)(nullWritableClassTag, textClassTag, null)
-      .saveAsHadoopFile[TextOutputFormat[NullWritable, Text]](path)
+    saveAsTextFile(path, null)
   }
 
   /**
    * Save this RDD as a compressed text file, using string representations of elements.
    */
   def saveAsTextFile(path: String, codec: Class[_ <: CompressionCodec]): Unit = withScope {
-    // https://issues.apache.org/jira/browse/SPARK-2075
-    val nullWritableClassTag = implicitly[ClassTag[NullWritable]]
-    val textClassTag = implicitly[ClassTag[Text]]
-    val r = this.mapPartitions { iter =>
+    this.mapPartitions { iter =>
       val text = new Text()
       iter.map { x =>
+        require(x != null, "text files do not allow null rows")
         text.set(x.toString)
         (NullWritable.get(), text)
       }
-    }
-    RDD.rddToPairRDDFunctions(r)(nullWritableClassTag, textClassTag, null)
-      .saveAsHadoopFile[TextOutputFormat[NullWritable, Text]](path, codec)
+    }.saveAsHadoopFile[TextOutputFormat[NullWritable, Text]](path, codec)
   }
 
   /**
@@ -1591,8 +1568,8 @@ abstract class RDD[T: ClassTag](
    * The checkpoint directory set through `SparkContext#setCheckpointDir` is not used.
    */
   def localCheckpoint(): this.type = RDDCheckpointData.synchronized {
-    if (conf.getBoolean("spark.dynamicAllocation.enabled", false) &&
-        conf.contains("spark.dynamicAllocation.cachedExecutorIdleTimeout")) {
+    if (conf.get(DYN_ALLOCATION_ENABLED) &&
+        conf.contains(DYN_ALLOCATION_CACHED_EXECUTOR_IDLE_TIMEOUT)) {
       logWarning("Local checkpointing is NOT safe to use with dynamic allocation, " +
         "which removes executors along with their cached blocks. If you must use both " +
         "features, you are advised to set `spark.dynamicAllocation.cachedExecutorIdleTimeout` " +

@@ -28,8 +28,7 @@ import scala.collection.JavaConverters._
 import scala.io.Source
 import scala.util.Random
 
-import org.apache.kafka.clients.admin.{AdminClient, ConsumerGroupListing}
-import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord, RecordMetadata}
+import org.apache.kafka.clients.producer.{ProducerRecord, RecordMetadata}
 import org.apache.kafka.common.TopicPartition
 import org.scalatest.concurrent.PatienceConfiguration.Timeout
 import org.scalatest.time.SpanSugar._
@@ -118,15 +117,10 @@ abstract class KafkaSourceTest extends StreamTest with SharedSQLContext with Kaf
       val sources: Seq[BaseStreamingSource] = {
         query.get.logicalPlan.collect {
           case StreamingExecutionRelation(source: KafkaSource, _) => source
-          case StreamingExecutionRelation(source: KafkaMicroBatchReadSupport, _) => source
-        } ++ (query.get.lastExecution match {
-          case null => Seq()
-          case e => e.logical.collect {
-            case r: StreamingDataSourceV2Relation
-                if r.readSupport.isInstanceOf[KafkaContinuousReadSupport] =>
-              r.readSupport.asInstanceOf[KafkaContinuousReadSupport]
-          }
-        })
+          case r: StreamingDataSourceV2Relation if r.stream.isInstanceOf[KafkaMicroBatchStream] ||
+              r.stream.isInstanceOf[KafkaContinuousStream] =>
+            r.stream
+        }
       }.distinct
 
       if (sources.isEmpty) {
@@ -200,6 +194,41 @@ abstract class KafkaMicroBatchSourceSuiteBase extends KafkaSourceSuiteBase {
       StopStream,
       StartStream(),
       StopStream)
+  }
+
+  test("SPARK-26718 Rate limit set to Long.Max should not overflow integer " +
+    "during end offset calculation") {
+    val topic = newTopic()
+    testUtils.createTopic(topic, partitions = 1)
+    // fill in 5 messages to trigger potential integer overflow
+    testUtils.sendMessages(topic, (0 until 5).map(_.toString).toArray, Some(0))
+
+    val partitionOffsets = Map(
+      new TopicPartition(topic, 0) -> 5L
+    )
+    val startingOffsets = JsonUtils.partitionOffsets(partitionOffsets)
+
+    val kafka = spark
+      .readStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", testUtils.brokerAddress)
+      // use latest to force begin to be 5
+      .option("startingOffsets", startingOffsets)
+      // use Long.Max to try to trigger overflow
+      .option("maxOffsetsPerTrigger", Long.MaxValue)
+      .option("subscribe", topic)
+      .option("kafka.metadata.max.age.ms", "1")
+      .load()
+      .selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")
+      .as[(String, String)]
+    val mapped: org.apache.spark.sql.Dataset[_] = kafka.map(kv => kv._2.toInt)
+
+    testStream(mapped)(
+      makeSureGetOffsetCalled,
+      AddKafkaData(Set(topic), 30, 31, 32, 33, 34),
+      CheckAnswer(30, 31, 32, 33, 34),
+      StopStream
+    )
   }
 
   test("maxOffsetsPerTrigger") {
@@ -1062,9 +1091,10 @@ class KafkaMicroBatchV2SourceSuite extends KafkaMicroBatchSourceSuiteBase {
     testStream(kafka)(
       makeSureGetOffsetCalled,
       AssertOnQuery { query =>
-        query.logicalPlan.collect {
-          case StreamingExecutionRelation(_: KafkaMicroBatchReadSupport, _) => true
-        }.nonEmpty
+        query.logicalPlan.find {
+          case r: StreamingDataSourceV2Relation => r.stream.isInstanceOf[KafkaMicroBatchStream]
+          case _ => false
+        }.isDefined
       }
     )
   }
@@ -1088,13 +1118,12 @@ class KafkaMicroBatchV2SourceSuite extends KafkaMicroBatchSourceSuiteBase {
           "kafka.bootstrap.servers" -> testUtils.brokerAddress,
           "subscribe" -> topic
         ) ++ Option(minPartitions).map { p => "minPartitions" -> p}
-        val readSupport = provider.createMicroBatchReadSupport(
-          dir.getAbsolutePath, new DataSourceOptions(options.asJava))
-        val config = readSupport.newScanConfigBuilder(
+        val dsOptions = new DataSourceOptions(options.asJava)
+        val table = provider.getTable(dsOptions)
+        val stream = table.newScanBuilder(dsOptions).build().toMicroBatchStream(dir.getAbsolutePath)
+        val inputPartitions = stream.planInputPartitions(
           KafkaSourceOffset(Map(tp -> 0L)),
-          KafkaSourceOffset(Map(tp -> 100L))).build()
-        val inputPartitions = readSupport.planInputPartitions(config)
-          .map(_.asInstanceOf[KafkaMicroBatchInputPartition])
+          KafkaSourceOffset(Map(tp -> 100L))).map(_.asInstanceOf[KafkaMicroBatchInputPartition])
         withClue(s"minPartitions = $minPartitions generated factories $inputPartitions\n\t") {
           assert(inputPartitions.size == numPartitionsGenerated)
           inputPartitions.foreach { f => assert(f.reuseKafkaConsumer == reusesConsumers) }
@@ -1410,7 +1439,7 @@ abstract class KafkaSourceSuiteBase extends KafkaSourceTest {
     val reader = spark
       .readStream
       .format("kafka")
-      .option("startingOffsets", s"latest")
+      .option("startingOffsets", "latest")
       .option("kafka.bootstrap.servers", testUtils.brokerAddress)
       .option("kafka.metadata.max.age.ms", "1")
       .option("failOnDataLoss", failOnDataLoss.toString)
