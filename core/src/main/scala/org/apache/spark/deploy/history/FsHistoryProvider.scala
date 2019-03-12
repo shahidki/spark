@@ -20,7 +20,7 @@ package org.apache.spark.deploy.history
 import java.io.{File, FileNotFoundException, IOException}
 import java.nio.file.Files
 import java.util.{Date, ServiceLoader}
-import java.util.concurrent._
+import java.util.concurrent.{LinkedBlockingQueue, _}
 import java.util.zip.{ZipEntry, ZipOutputStream}
 
 import scala.collection.JavaConverters._
@@ -121,9 +121,15 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   // and applications between check task and clean task.
   private val pool = ThreadUtils.newDaemonSingleThreadScheduledExecutor("spark-history-task-%d")
 
-  private val replayPool = ThreadUtils.newDaemonSingleThreadScheduledExecutor("history-replay")
+  private val replayPool = ThreadUtils.newDaemonFixedThreadPool(NUM_PROCESSING_THREADS,
+    "history-replay")
 
-  private val completedQueue = new LinkedBlockingQueue[(String, Option[String])]()
+  private val isDiskStore = conf.get(LOCAL_STORE_DIR).nonEmpty
+  private val completedQueue = if (isDiskStore) {
+    Some(new LinkedBlockingQueue[(String, Option[String])]())
+  } else {
+    None
+  }
 
   // The modification time of the newest log detected during the last scan.   Currently only
   // used for logging msgs (logs are re-scanned based on file size, rather than modtime)
@@ -778,7 +784,12 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         // the file is really gone.
         if (appCompleted) {
           logError(s"putting the ${logPath} into completed Queue")
-          completedQueue.put((app.id, app.attempts.head.info.attemptId))
+          if (isDiskStore) {
+            completedQueue.get.put((app.id, app.attempts.head.info.attemptId))
+            replayPool.submit(new Runnable {
+              override def run(): Unit = updateCache()
+            })
+          }
           val inProgressLog = logPath.toString() + EventLoggingListener.IN_PROGRESS
           try {
             // Fetch the entry first to avoid an RPC when it's already removed.
@@ -821,11 +832,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   private[history] def updateCache(): Unit = Utils.tryLog {
-    while (completedQueue.size() > 0) {
-      val numLogsToCache = completedQueue.size()
-      val x = completedQueue.take()
-      val appId = x._1
-      val attemptId = x._2
+    while (completedQueue.get.size() > 0) {
+      val numLogsToCache = completedQueue.get.size()
+      val (appId, attemptId) = completedQueue.get.take()
       val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
       val app = try {
         load(appId)
@@ -838,23 +847,25 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       if (attempt == null) {
         return None
       }
-      val kvstore = try {
-        diskManager match {
-          case Some(sm) =>
-            loadDiskStore(sm, appId, attempt)
-
-          case _ =>
-            createInMemoryStore(attempt)
+      // At this point the disk data either does not exist or was deleted because it failed to
+      // load, so the event log needs to be replayed.
+      val status = fs.getFileStatus(new Path(logDir, attempt.logPath))
+      val isCompressed = EventLoggingListener.codecName(status.getPath()).flatMap { name =>
+        Try(CompressionCodec.getShortName(name)).toOption
+      }.isDefined
+      logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
+      val lease = diskManager.get.lease(status.getLen(), isCompressed)
+      val newStorePath = try {
+        Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
+          rebuildAppStore(store, status, Some(attempt.info.lastUpdated.getTime()))
         }
+        lease.commit(appId, attempt.info.attemptId)
       } catch {
-        case _: FileNotFoundException =>
-          return None
+        case e: Exception =>
+          lease.rollback()
+          throw e
       }
-      kvstore.close()
     }
-
-
-
   }
   /**
    * Delete event logs from the log directory according to the clean policy defined by the user.
