@@ -121,8 +121,13 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   // and applications between check task and clean task.
   private val pool = ThreadUtils.newDaemonSingleThreadScheduledExecutor("spark-history-task-%d")
 
-  private val replayPool = ThreadUtils.newDaemonFixedThreadPool(NUM_PROCESSING_THREADS,
-    "history-replay")
+
+  private val replayPool = if (isDiskStore) {
+    Option(ThreadUtils.newDaemonFixedThreadPool(NUM_PROCESSING_THREADS,
+      "history-replay"))
+  } else {
+    None
+  }
 
   private val isDiskStore = conf.get(LOCAL_STORE_DIR).nonEmpty
   private val completedQueue = if (isDiskStore) {
@@ -299,9 +304,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           TimeUnit.SECONDS)
       }
 
-      replayPool.scheduleWithFixedDelay(
-        getRunner(() => updateCache()), 0, UPDATE_INTERVAL_S, TimeUnit.SECONDS)
-
     } else {
       logDebug("Background update thread disabled for testing")
     }
@@ -414,7 +416,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         initThread.interrupt()
         initThread.join()
       }
-      Seq(pool, replayExecutor).foreach { executor =>
+      Seq(pool, replayExecutor, replayPool.get).foreach { executor =>
         executor.shutdown()
         if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
           executor.shutdownNow()
@@ -785,9 +787,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         if (appCompleted) {
           logError(s"putting the ${logPath} into completed Queue")
           if (isDiskStore) {
-            completedQueue.get.put((app.id, app.attempts.head.info.attemptId))
-            replayPool.submit(new Runnable {
-              override def run(): Unit = updateCache()
+            replayPool.get.submit(new Runnable {
+              override def run(): Unit = updateCache(app.id, app.attempts.head.info.attemptId.get)
             })
           }
           val inProgressLog = logPath.toString() + EventLoggingListener.IN_PROGRESS
@@ -831,42 +832,55 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     }
   }
 
-  private[history] def updateCache(): Unit = Utils.tryLog {
-    while (completedQueue.get.size() > 0) {
-      val numLogsToCache = completedQueue.get.size()
-      val (appId, attemptId) = completedQueue.get.take()
-      val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
-      val app = try {
-        load(appId)
-      } catch {
-        case _: NoSuchElementException =>
-          return None
-      }
-      logError(s"Storing ${appId} into kvstore..")
-      val attempt = app.attempts.find(_.info.attemptId == attemptId).orNull
-      if (attempt == null) {
-        return None
-      }
-      // At this point the disk data either does not exist or was deleted because it failed to
-      // load, so the event log needs to be replayed.
-      val status = fs.getFileStatus(new Path(logDir, attempt.logPath))
-      val isCompressed = EventLoggingListener.codecName(status.getPath()).flatMap { name =>
-        Try(CompressionCodec.getShortName(name)).toOption
-      }.isDefined
-      logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
-      val lease = diskManager.get.lease(status.getLen(), isCompressed)
-      val newStorePath = try {
-        Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
-          rebuildAppStore(store, status, Some(attempt.info.lastUpdated.getTime()))
-        }
-        lease.commit(appId, attempt.info.attemptId)
+  private[history] def updateCache(appId: String, attemptId: String): Unit = Utils.tryLog {
+    val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
+    val app = try {
+      load(appId)
+    } catch {
+      case _: NoSuchElementException =>
+        return
+    }
+    logError(s"Storing ${appId} into kvstore..")
+    val attempt = app.attempts.find(_.info.attemptId == attemptId).orNull
+    if (attempt == null) {
+      return
+    }
+    diskManager.get.openStore(appId, attempt.info.attemptId).foreach { path =>
+      try {
+        KVUtils.open(path, metadata)
       } catch {
         case e: Exception =>
-          lease.rollback()
-          throw e
+          logInfo(s"Failed to open existing store for $appId/${attempt.info.attemptId}.", e)
+          diskManager.get.release(appId, attempt.info.attemptId, delete = true)
+          return
       }
     }
+    // At this point the disk data either does not exist or was deleted because it failed to
+    // load, so the event log needs to be replayed.
+    val status = fs.getFileStatus(new Path(logDir, attempt.logPath))
+
+    val isCompressed = EventLoggingListener.codecName(status.getPath()).flatMap { name =>
+      Try(CompressionCodec.getShortName(name)).toOption
+    }.isDefined
+    if (isCompressed && status.getLen * 2 > conf.get(MAX_LOCAL_DISK_USAGE)
+      || !isCompressed && status.getLen / 2 > conf.get(MAX_LOCAL_DISK_USAGE)) {
+      return
+    }
+    logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
+
+    val lease = diskManager.get.lease(status.getLen(), isCompressed)
+    val newStorePath = try {
+      Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
+        rebuildAppStore(store, status, Some(attempt.info.lastUpdated.getTime()))
+      }
+      lease.commit(appId, attempt.info.attemptId)
+    } catch {
+      case e: Exception =>
+        lease.rollback()
+        throw e
+    }
   }
+
   /**
    * Delete event logs from the log directory according to the clean policy defined by the user.
    */
