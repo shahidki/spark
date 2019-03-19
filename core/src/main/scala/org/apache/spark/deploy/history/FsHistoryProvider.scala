@@ -19,6 +19,7 @@ package org.apache.spark.deploy.history
 
 import java.io.{File, FileNotFoundException, IOException}
 import java.nio.file.Files
+import java.util.concurrent.locks.{Lock, ReentrantLock}
 import java.util.{Date, ServiceLoader}
 import java.util.concurrent.{LinkedBlockingQueue, _}
 import java.util.zip.{ZipEntry, ZipOutputStream}
@@ -54,6 +55,8 @@ import org.apache.spark.status.api.v1.{ApplicationAttemptInfo, ApplicationInfo}
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.{Clock, SystemClock, ThreadUtils, Utils}
 import org.apache.spark.util.kvstore._
+
+import scala.collection.mutable.HashMap
 
 
 /**
@@ -130,11 +133,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   private val isDiskStore = conf.get(LOCAL_STORE_DIR).nonEmpty
-  private val completedQueue = if (isDiskStore) {
-    Some(new LinkedBlockingQueue[(String, Option[String])]())
-  } else {
-    None
-  }
+
+  val activeStore = new HashMap[(String, Option[String]), Lock]()
 
   // The modification time of the newest log detected during the last scan.   Currently only
   // used for logging msgs (logs are re-scanned based on file size, rather than modtime)
@@ -340,6 +340,16 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   override def getAppUI(appId: String, attemptId: Option[String]): Option[LoadedAppUI] = {
+    if (isDiskStore) {
+      activeStore.synchronized {
+        if (activeStore.contains((appId, attemptId))) {
+          activeStore((appId, attemptId)).lock()
+        } else {
+          activeStore((appId, attemptId)) = new ReentrantLock()
+          activeStore((appId, attemptId)).lock()
+        }
+      }
+    }
     val app = try {
       load(appId)
      } catch {
@@ -382,6 +392,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     loadPlugins().foreach(_.setupUI(ui))
 
     val loadedUI = LoadedAppUI(ui)
+    if(isDiskStore) {
+      activeStore.synchronized {
+        activeStore((appId, attemptId)).unlock()
+      }
+    }
 
     synchronized {
       activeUIs((appId, attemptId)) = loadedUI
@@ -788,7 +803,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           logError(s"putting the ${logPath} into completed Queue")
           if (isDiskStore) {
             replayPool.get.submit(new Runnable {
-              override def run(): Unit = updateCache(app.id, app.attempts.head.info.attemptId.get)
+              override def run(): Unit = updateCache(app.id, app.attempts.head.info.attemptId)
             })
           }
           val inProgressLog = logPath.toString() + EventLoggingListener.IN_PROGRESS
@@ -832,7 +847,17 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     }
   }
 
-  private[history] def updateCache(appId: String, attemptId: String): Unit = Utils.tryLog {
+  private[history] def updateCache(appId: String, attemptId: Option[String]): Unit = Utils.tryLog {
+    activeStore.synchronized {
+      if (activeStore.contains((appId, attemptId))) {
+        return
+      }
+      activeStore((appId, attemptId)) = new ReentrantLock()
+      activeStore((appId, attemptId)).lock()
+    }
+
+
+
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
     val app = try {
       load(appId)
@@ -845,16 +870,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     if (attempt == null) {
       return
     }
-    diskManager.get.openStore(appId, attempt.info.attemptId).foreach { path =>
-      try {
-        KVUtils.open(path, metadata)
-      } catch {
-        case e: Exception =>
-          logInfo(s"Failed to open existing store for $appId/${attempt.info.attemptId}.", e)
-          diskManager.get.release(appId, attempt.info.attemptId, delete = true)
-          return
-      }
-    }
+
     // At this point the disk data either does not exist or was deleted because it failed to
     // load, so the event log needs to be replayed.
     val status = fs.getFileStatus(new Path(logDir, attempt.logPath))
@@ -878,6 +894,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       case e: Exception =>
         lease.rollback()
         throw e
+    }
+    activeStore.synchronized {
+      activeStore((appId, attemptId)).unlock()
     }
   }
 
