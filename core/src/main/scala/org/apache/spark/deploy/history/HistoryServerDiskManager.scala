@@ -80,7 +80,7 @@ private class HistoryServerDiskManager(
     }.toSeq
 
     orphans.foreach { info =>
-     listing.delete(info.getClass(), info.path)
+      listing.delete(info.getClass(), info.path)
     }
 
     logInfo("Initialized disk manager: " +

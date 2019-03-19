@@ -24,7 +24,6 @@ import org.mockito.Mockito.when
 import org.scalatest.mockito.MockitoSugar._
 import scala.collection.mutable.{Map => MutableMap}
 
-// import org.apache.spark.util.random.XORShiftRandom
 import org.apache.spark.ml.SparkMLFunSuite
 import org.apache.spark.ml.util.TestingUtils._
 
@@ -814,9 +813,12 @@ class MatricesSuite extends SparkMLFunSuite {
   }
 
   test("randn") {
-    //val rng = new XORShiftRandom(1)// mock[Random]
-      // when(rng.nextGaussian()).thenReturn(1.0, 2.0, 3.0, 4.0)
-
+    val rng = mock[Random]
+    when(rng.nextGaussian()).thenReturn(1.0, 2.0, 3.0, 4.0)
+    val mat = Matrices.randn(2, 2, rng).asInstanceOf[DenseMatrix]
+    assert(mat.numRows === 2)
+    assert(mat.numCols === 2)
+    assert(mat.values.toSeq === Seq(1.0, 2.0, 3.0, 4.0))
   }
 
   test("diag") {
