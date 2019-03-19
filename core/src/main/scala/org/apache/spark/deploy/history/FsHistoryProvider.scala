@@ -124,7 +124,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private val pool = ThreadUtils.newDaemonSingleThreadScheduledExecutor("spark-history-task-%d")
 
   private val diskStoreCacheEnabled = conf.get(LOCAL_STORE_DIR).nonEmpty &&
-    conf.get(DISK_BACKGROUND_CACHE_ENABLED) && Utils.isTesting
+    conf.get(DISK_BACKGROUND_CACHE_ENABLED)
 
   private val replayPool = if (diskStoreCacheEnabled) {
     Some(ThreadUtils.newDaemonSingleThreadScheduledExecutor("history-replay-cache"))
@@ -795,13 +795,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         if (appCompleted) {
           logError(s"putting the ${logPath} into completed Queue")
           if (diskStoreCacheEnabled) {
-            try {
+
               replayPool.get.submit(new Runnable {
                 override def run(): Unit = updateCache(app.id, app.attempts.head.info.attemptId)
               })
-            } catch {
-              case ex: Exception => logError(s"Failed to create cache store, $ex")
-            }
+
           }
           val inProgressLog = logPath.toString() + EventLoggingListener.IN_PROGRESS
           try {
