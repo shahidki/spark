@@ -76,11 +76,13 @@ private class HistoryServerDiskManager(
     // Go through the recorded store directories and remove any that may have been removed by
     // external code.
     val orphans = listing.view(classOf[ApplicationStoreInfo]).asScala.filter { info =>
+               logError(s"path is ${info.path}")
       !new File(info.path).exists()
     }.toSeq
 
-    orphans.foreach { info =>
-      listing.delete(info.getClass(), info.path)
+    logError(s"Orphan size is ${orphans.size}")
+    orphans.foreach { info: ApplicationStoreInfo =>
+     listing.delete(info.getClass(), info.path)
     }
 
     logInfo("Initialized disk manager: " +
@@ -233,7 +235,7 @@ private class HistoryServerDiskManager(
     }
   }
 
-  private def appStorePath(appId: String, attemptId: Option[String]): File = {
+  private[history] def appStorePath(appId: String, attemptId: Option[String]): File = {
     val fileName = appId + attemptId.map("_" + _).getOrElse("") + ".ldb"
     new File(appStoreDir, fileName)
   }

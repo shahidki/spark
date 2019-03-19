@@ -124,17 +124,20 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   // and applications between check task and clean task.
   private val pool = ThreadUtils.newDaemonSingleThreadScheduledExecutor("spark-history-task-%d")
 
+  private val isDiskStore = conf.get(LOCAL_STORE_DIR).nonEmpty
+
 
   private val replayPool = if (isDiskStore) {
-    Option(ThreadUtils.newDaemonFixedThreadPool(NUM_PROCESSING_THREADS,
-      "history-replay"))
+    ThreadUtils.newDaemonFixedThreadPool(1, "history-replay-cache")
   } else {
     None
   }
 
-  private val isDiskStore = conf.get(LOCAL_STORE_DIR).nonEmpty
-
-  val activeStore = new HashMap[(String, Option[String]), Lock]()
+  val activeStore: ConcurrentHashMap[(String, Option[String]), Lock] = if (isDiskStore) {
+    new ConcurrentHashMap[(String, Option[String]), Lock]()
+  } else {
+    None
+  }
 
   // The modification time of the newest log detected during the last scan.   Currently only
   // used for logging msgs (logs are re-scanned based on file size, rather than modtime)
@@ -340,16 +343,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   override def getAppUI(appId: String, attemptId: Option[String]): Option[LoadedAppUI] = {
-    if (isDiskStore) {
-      activeStore.synchronized {
-        if (activeStore.contains((appId, attemptId))) {
-          activeStore((appId, attemptId)).lock()
-        } else {
-          activeStore((appId, attemptId)) = new ReentrantLock()
-          activeStore((appId, attemptId)).lock()
-        }
-      }
-    }
+
+
     val app = try {
       load(appId)
      } catch {
@@ -392,11 +387,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     loadPlugins().foreach(_.setupUI(ui))
 
     val loadedUI = LoadedAppUI(ui)
-    if(isDiskStore) {
-      activeStore.synchronized {
-        activeStore((appId, attemptId)).unlock()
-      }
-    }
+
+    logError("finished loading..")
 
     synchronized {
       activeUIs((appId, attemptId)) = loadedUI
@@ -431,11 +423,20 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         initThread.interrupt()
         initThread.join()
       }
-      Seq(pool, replayExecutor, replayPool.get).foreach { executor =>
+      Seq(pool, replayExecutor).foreach { executor =>
         executor.shutdown()
         if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
           executor.shutdownNow()
         }
+      }
+      if (isDiskStore) {
+        Seq(replayPool.asInstanceOf[ThreadPoolExecutor]).foreach{ x =>
+        x.shutdown()
+        if (!x.awaitTermination(5, TimeUnit.SECONDS)) {
+          x.shutdownNow()
+        }
+      }
+
       }
     } finally {
       activeUIs.foreach { case (_, loadedUI) => loadedUI.ui.store.close() }
@@ -794,15 +795,12 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         addListing(app)
         listing.write(LogInfo(logPath.toString(), scanTime, LogType.EventLogs, Some(app.info.id),
           app.attempts.head.info.attemptId, fileStatus.getLen()))
-//        if (!entry.getPath.getName.contains("inprogress")) {
-//          completedQueue.put(entry.getPath)
-//        }
         // For a finished log, remove the corresponding "in progress" entry from the listing DB if
         // the file is really gone.
         if (appCompleted) {
           logError(s"putting the ${logPath} into completed Queue")
           if (isDiskStore) {
-            replayPool.get.submit(new Runnable {
+            replayPool.asInstanceOf[ThreadPoolExecutor].submit(new Runnable {
               override def run(): Unit = updateCache(app.id, app.attempts.head.info.attemptId)
             })
           }
@@ -848,15 +846,14 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   private[history] def updateCache(appId: String, attemptId: Option[String]): Unit = Utils.tryLog {
-    activeStore.synchronized {
-      if (activeStore.contains((appId, attemptId))) {
+      // If it is already parsing or finished parsing, then return.
+      if (activeStore.contains((appId, attemptId)) ||
+        diskManager.get.appStorePath(appId, attemptId).exists()) {
+        logError("I'm returning..")
         return
       }
-      activeStore((appId, attemptId)) = new ReentrantLock()
-      activeStore((appId, attemptId)).lock()
-    }
-
-
+      // First time parsing, so lock it.
+      activeStore.getOrDefault((appId, attemptId), new ReentrantLock()).lock()
 
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
     val app = try {
@@ -885,18 +882,20 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
 
     val lease = diskManager.get.lease(status.getLen(), isCompressed)
-    val newStorePath = try {
+    try {
       Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
         rebuildAppStore(store, status, Some(attempt.info.lastUpdated.getTime()))
       }
       lease.commit(appId, attempt.info.attemptId)
+      logError(s" Done parsing $appId / ${attempt.info.attemptId}...")
     } catch {
       case e: Exception =>
         lease.rollback()
         throw e
     }
+    activeStore.get((appId, attemptId)).unlock()
     activeStore.synchronized {
-      activeStore((appId, attemptId)).unlock()
+      activeStore.remove((appId, attemptId))
     }
   }
 
@@ -1116,6 +1115,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       attempt: AttemptInfoWrapper): KVStore = {
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
 
+      activeStore.getOrDefault((appId, attempt), new ReentrantLock()).lock()
+
+    logError("Started loading..")
     // First check if the store already exists and try to open it. If that fails, then get rid of
     // the existing data.
     dm.openStore(appId, attempt.info.attemptId).foreach { path =>
@@ -1145,6 +1147,10 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       case e: Exception =>
         lease.rollback()
         throw e
+    }
+    activeStore.get((appId, attempt)).unlock()
+    activeStore.synchronized {
+      activeStore.remove((appId, attempt))
     }
 
     KVUtils.open(newStorePath, metadata)
