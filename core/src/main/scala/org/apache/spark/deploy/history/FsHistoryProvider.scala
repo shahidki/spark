@@ -21,7 +21,7 @@ import java.io.{File, FileNotFoundException, IOException}
 import java.nio.file.Files
 import java.util.concurrent.locks.{Lock, ReentrantLock}
 import java.util.{Date, ServiceLoader}
-import java.util.concurrent.{LinkedBlockingQueue, _}
+import java.util.concurrent.{ConcurrentHashMap, ExecutorService, Future, TimeUnit}
 import java.util.zip.{ZipEntry, ZipOutputStream}
 
 import scala.collection.JavaConverters._
@@ -30,6 +30,7 @@ import scala.concurrent.ExecutionException
 import scala.io.Source
 import scala.util.Try
 import scala.xml.Node
+
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.google.common.io.ByteStreams
 import com.google.common.util.concurrent.MoreExecutors
@@ -38,6 +39,7 @@ import org.apache.hadoop.hdfs.{DFSInputStream, DistributedFileSystem}
 import org.apache.hadoop.hdfs.protocol.HdfsConstants
 import org.apache.hadoop.security.AccessControlException
 import org.fusesource.leveldbjni.internal.NativeDB
+
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
@@ -55,9 +57,6 @@ import org.apache.spark.status.api.v1.{ApplicationAttemptInfo, ApplicationInfo}
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.{Clock, SystemClock, ThreadUtils, Utils}
 import org.apache.spark.util.kvstore._
-
-import scala.collection.mutable.HashMap
-
 
 /**
  * A class that provides application history from event logs stored in the file system.
@@ -126,7 +125,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
   private val isDiskStore = conf.get(LOCAL_STORE_DIR).nonEmpty
 
-
   private val replayPool = if (isDiskStore) {
     ThreadUtils.newDaemonFixedThreadPool(1, "history-replay-cache")
   } else {
@@ -135,7 +133,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
   val activeStore = new ConcurrentHashMap[(String, Option[String]), Lock]()
 
-
   // The modification time of the newest log detected during the last scan.   Currently only
   // used for logging msgs (logs are re-scanned based on file size, rather than modtime)
   private val lastScanTime = new java.util.concurrent.atomic.AtomicLong(-1)
@@ -143,8 +140,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private val pendingReplayTasksCount = new java.util.concurrent.atomic.AtomicInteger(0)
 
   private val storePath = conf.get(LOCAL_STORE_DIR).map(new File(_))
-  // TODO:
-  //  private val storeDisk = conf.get(LOCAL_STORE_DIR).map(new File(_))
   private val fastInProgressParsing = conf.get(FAST_IN_PROGRESS_PARSING)
 
   // Visible for testing.
@@ -237,7 +232,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     // Cannot probe anything while the FS is in safe mode, so spawn a new thread that will wait
     // for the FS to leave safe mode before enabling polling. This allows the main history server
     // UI to be shown (so that the user can see the HDFS status).
-    val initThread = new Thread {
+    val initThread = new Thread(new Runnable() {
       override def run(): Unit = {
         try {
           while (isFsInSafeMode()) {
@@ -251,7 +246,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           case _: InterruptedException =>
         }
       }
-    }
+    })
+
     initThread.setDaemon(true)
     initThread.setName(s"${getClass().getSimpleName()}-init")
     initThread.setUncaughtExceptionHandler(errorHandler.getOrElse(
@@ -303,7 +299,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           conf.get(DRIVER_LOG_CLEANER_INTERVAL),
           TimeUnit.SECONDS)
       }
-
     } else {
       logDebug("Background update thread disabled for testing")
     }
@@ -340,8 +335,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   override def getAppUI(appId: String, attemptId: Option[String]): Option[LoadedAppUI] = {
-
-
     val app = try {
       load(appId)
      } catch {
@@ -1013,7 +1006,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private def rebuildAppStore(
       store: KVStore,
       eventLog: FileStatus,
-      lastUpdated: Option[Long] = None): Unit = {
+      lastUpdated: Long): Unit = {
     // Disable async updates, since they cause higher memory usage, and it's ok to take longer
     // to parse the event logs in the SHS.
     val replayConf = conf.clone().set(ASYNC_TRACKING_ENABLED, false)
@@ -1022,7 +1015,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val listener = new AppStatusListener(trackingStore, replayConf, false,
       lastUpdateTime = lastUpdated)
     replayBus.addListener(listener)
-
 
     for {
       plugin <- loadPlugins()
@@ -1140,7 +1132,7 @@ if(isDiskStore) {
     val lease = dm.lease(status.getLen(), isCompressed)
     val newStorePath = try {
       Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
-        rebuildAppStore(store, status, Some(attempt.info.lastUpdated.getTime()))
+        rebuildAppStore(store, status, attempt.info.lastUpdated.getTime())
       }
       lease.commit(appId, attempt.info.attemptId)
     } catch {
@@ -1161,7 +1153,7 @@ if(isDiskStore) {
   private def createInMemoryStore(attempt: AttemptInfoWrapper): KVStore = {
     val store = new InMemoryStore()
     val status = fs.getFileStatus(new Path(logDir, attempt.logPath))
-    rebuildAppStore(store, status, Option(attempt.info.lastUpdated.getTime()))
+    rebuildAppStore(store, status, attempt.info.lastUpdated.getTime())
     store
   }
 
