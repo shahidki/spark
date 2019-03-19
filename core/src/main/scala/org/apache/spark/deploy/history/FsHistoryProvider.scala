@@ -21,7 +21,7 @@ import java.io.{File, FileNotFoundException, IOException}
 import java.nio.file.Files
 import java.util.concurrent.locks.{Lock, ReentrantLock}
 import java.util.{Date, ServiceLoader}
-import java.util.concurrent.{ConcurrentHashMap, ExecutorService, Future, TimeUnit}
+import java.util.concurrent._
 import java.util.zip.{ZipEntry, ZipOutputStream}
 
 import scala.collection.JavaConverters._
@@ -30,7 +30,6 @@ import scala.concurrent.ExecutionException
 import scala.io.Source
 import scala.util.Try
 import scala.xml.Node
-
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.google.common.io.ByteStreams
 import com.google.common.util.concurrent.MoreExecutors
@@ -39,7 +38,6 @@ import org.apache.hadoop.hdfs.{DFSInputStream, DistributedFileSystem}
 import org.apache.hadoop.hdfs.protocol.HdfsConstants
 import org.apache.hadoop.security.AccessControlException
 import org.fusesource.leveldbjni.internal.NativeDB
-
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
@@ -247,7 +245,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         }
       }
     })
-
     initThread.setDaemon(true)
     initThread.setName(s"${getClass().getSimpleName()}-init")
     initThread.setUncaughtExceptionHandler(errorHandler.getOrElse(
@@ -785,6 +782,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         addListing(app)
         listing.write(LogInfo(logPath.toString(), scanTime, LogType.EventLogs, Some(app.info.id),
           app.attempts.head.info.attemptId, fileStatus.getLen()))
+
         // For a finished log, remove the corresponding "in progress" entry from the listing DB if
         // the file is really gone.
         if (appCompleted) {
@@ -875,7 +873,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val lease = diskManager.get.lease(status.getLen(), isCompressed)
     try {
       Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
-        rebuildAppStore(store, status, Some(attempt.info.lastUpdated.getTime()))
+        rebuildAppStore(store, status, attempt.info.lastUpdated.getTime())
       }
       lease.commit(appId, attempt.info.attemptId)
       logError(s" Done parsing $appId / ${attempt.info.attemptId}...")
@@ -1013,7 +1011,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val trackingStore = new ElementTrackingStore(store, replayConf)
     val replayBus = new ReplayListenerBus()
     val listener = new AppStatusListener(trackingStore, replayConf, false,
-      lastUpdateTime = lastUpdated)
+      lastUpdateTime = Some(lastUpdated))
     replayBus.addListener(listener)
 
     for {
