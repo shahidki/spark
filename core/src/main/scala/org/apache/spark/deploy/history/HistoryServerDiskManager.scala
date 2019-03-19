@@ -76,12 +76,10 @@ private class HistoryServerDiskManager(
     // Go through the recorded store directories and remove any that may have been removed by
     // external code.
     val orphans = listing.view(classOf[ApplicationStoreInfo]).asScala.filter { info =>
-               logError(s"path is ${info.path}")
       !new File(info.path).exists()
     }.toSeq
 
-    logError(s"Orphan size is ${orphans.size}")
-    orphans.foreach { info: ApplicationStoreInfo =>
+    orphans.foreach { info =>
      listing.delete(info.getClass(), info.path)
     }
 

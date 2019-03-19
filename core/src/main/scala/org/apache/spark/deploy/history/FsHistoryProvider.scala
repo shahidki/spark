@@ -133,11 +133,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     None
   }
 
-  val activeStore: ConcurrentHashMap[(String, Option[String]), Lock] = if (isDiskStore) {
-    new ConcurrentHashMap[(String, Option[String]), Lock]()
-  } else {
-    None
-  }
+  val activeStore = new ConcurrentHashMap[(String, Option[String]), Lock]()
+
 
   // The modification time of the newest log detected during the last scan.   Currently only
   // used for logging msgs (logs are re-scanned based on file size, rather than modtime)
@@ -853,7 +850,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         return
       }
       // First time parsing, so lock it.
-      activeStore.getOrDefault((appId, attemptId), new ReentrantLock()).lock()
+      activeStore.putIfAbsent((appId, attemptId), new ReentrantLock())
+      activeStore.get((appId, attemptId)).lock()
 
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
     val app = try {
@@ -1114,8 +1112,10 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       appId: String,
       attempt: AttemptInfoWrapper): KVStore = {
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
-
-      activeStore.getOrDefault((appId, attempt), new ReentrantLock()).lock()
+if(isDiskStore) {
+  activeStore.putIfAbsent((appId, attempt.info.attemptId), new ReentrantLock())
+  activeStore.get((appId, attempt.info.attemptId)).lock()
+}
 
     logError("Started loading..")
     // First check if the store already exists and try to open it. If that fails, then get rid of
@@ -1148,9 +1148,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         lease.rollback()
         throw e
     }
-    activeStore.get((appId, attempt)).unlock()
-    activeStore.synchronized {
-      activeStore.remove((appId, attempt))
+    if (isDiskStore) {
+      activeStore.get((appId, attempt.info.attemptId)).unlock()
+      activeStore.synchronized {
+        activeStore.remove((appId, attempt))
+      }
     }
 
     KVUtils.open(newStorePath, metadata)
