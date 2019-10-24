@@ -137,6 +137,9 @@ class ResolveCatalogs(val catalogManager: CatalogManager)
         writeOptions = c.options.filterKeys(_ != "path"),
         ignoreIfExists = c.ifNotExists)
 
+    case RefreshTableStatement(NonSessionCatalog(catalog, tableName)) =>
+      RefreshTable(catalog.asTableCatalog, tableName.asIdentifier)
+
     case c @ ReplaceTableStatement(
          NonSessionCatalog(catalog, tableName), _, _, _, _, _, _, _, _, _) =>
       ReplaceTable(
@@ -168,6 +171,13 @@ class ResolveCatalogs(val catalogManager: CatalogManager)
         s"Can not specify catalog `${catalog.name}` for view ${viewName.quoted} " +
           s"because view support in catalog has not been implemented yet")
 
+    case c @ CreateNamespaceStatement(NonSessionCatalog(catalog, nameParts), _, _) =>
+      CreateNamespace(
+        catalog.asNamespaceCatalog,
+        nameParts,
+        c.ifNotExists,
+        c.properties)
+
     case ShowNamespacesStatement(Some(CatalogAndNamespace(catalog, namespace)), pattern) =>
       ShowNamespaces(catalog.asNamespaceCatalog, namespace, pattern)
 
@@ -177,9 +187,8 @@ class ResolveCatalogs(val catalogManager: CatalogManager)
     case ShowTablesStatement(Some(NonSessionCatalog(catalog, nameParts)), pattern) =>
       ShowTables(catalog.asTableCatalog, nameParts, pattern)
 
-    // TODO (SPARK-29014): we should check if the current catalog is not session catalog here.
-    case ShowTablesStatement(None, pattern) if defaultCatalog.isDefined =>
-      ShowTables(defaultCatalog.get.asTableCatalog, catalogManager.currentNamespace, pattern)
+    case ShowTablesStatement(None, pattern) if !isSessionCatalog(currentCatalog) =>
+      ShowTables(currentCatalog.asTableCatalog, catalogManager.currentNamespace, pattern)
 
     case UseStatement(isNamespaceSet, nameParts) =>
       if (isNamespaceSet) {
