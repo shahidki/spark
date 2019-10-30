@@ -22,13 +22,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.hive.service.cli.thrift.{ThriftBinaryCLIService, ThriftHttpCLIService}
 import org.apache.hive.service.server.HiveServer2
-
-import org.apache.spark.SparkContext
+import org.apache.spark.{SparkConf, SparkContext, SparkException}
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.UI.UI_ENABLED
@@ -38,6 +36,7 @@ import org.apache.spark.sql.hive.HiveUtils
 import org.apache.spark.sql.hive.thriftserver.ReflectionUtils._
 import org.apache.spark.sql.hive.thriftserver.ui.ThriftServerTab
 import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.{ShutdownHookManager, Utils}
 
 /**
@@ -65,11 +64,17 @@ object HiveThriftServer2 extends Logging {
     listener = new HiveThriftServer2Listener(server, sqlContext.conf)
     sqlContext.sparkContext.addSparkListener(listener)
     uiTab = if (sqlContext.sparkContext.getConf.get(UI_ENABLED)) {
-      Some(new ThriftServerTab(sqlContext.sparkContext))
+      Some(new ThriftServerTab(getSparkUI(sqlContext.sparkContext)))
     } else {
       None
     }
     server
+  }
+
+  def getSparkUI(sparkContext: SparkContext): SparkUI = {
+    sparkContext.ui.getOrElse {
+      throw new SparkException("Parent SparkUI to attach this tab to not found!")
+    }
   }
 
   def main(args: Array[String]): Unit = {
@@ -176,8 +181,8 @@ object HiveThriftServer2 extends Logging {
     }
     private val sessionList = new mutable.LinkedHashMap[String, SessionInfo]
     private val executionList = new mutable.LinkedHashMap[String, ExecutionInfo]
-    private val retainedStatements = conf.getConf(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT)
-    private val retainedSessions = conf.getConf(SQLConf.THRIFTSERVER_UI_SESSION_LIMIT)
+    private val retainedStatements = conf.get(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT)
+    private val retainedSessions = conf.get(SQLConf.THRIFTSERVER_UI_SESSION_LIMIT)
 
     def getOnlineSessionNum: Int = synchronized {
       sessionList.count(_._2.finishTimestamp == 0)
