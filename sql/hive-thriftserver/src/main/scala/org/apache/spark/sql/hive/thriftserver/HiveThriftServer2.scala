@@ -20,22 +20,20 @@ package org.apache.spark.sql.hive.thriftserver
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
-import scala.collection.mutable
-import scala.collection.mutable.ArrayBuffer
 import org.apache.hadoop.hive.conf.HiveConf
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.hive.service.cli.thrift.{ThriftBinaryCLIService, ThriftHttpCLIService}
 import org.apache.hive.service.server.HiveServer2
-import org.apache.spark.{SparkConf, SparkContext, SparkException}
+
+import org.apache.spark.{SparkContext, SparkException}
 import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.UI.UI_ENABLED
-import org.apache.spark.scheduler.{SparkListener, SparkListenerApplicationEnd, SparkListenerEvent, SparkListenerJobStart}
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.hive.HiveUtils
 import org.apache.spark.sql.hive.thriftserver.ReflectionUtils._
-import org.apache.spark.sql.hive.thriftserver.ui.ThriftServerTab
-import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.sql.hive.thriftserver.ui.{HiveThriftServer2AppStatusStore, ThriftServerTab}
+import org.apache.spark.status.ElementTrackingStore
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.{ShutdownHookManager, Utils}
 
@@ -61,10 +59,13 @@ object HiveThriftServer2 extends Logging {
 
     server.init(executionHive.conf)
     server.start()
-    listener = new LiveHiveThriftServer2Listener(server, sqlContext.conf, sqlContext.sparkContext)
+    val kvStore = SparkSQLEnv.sqlContext.sparkContext
+      .statusStore.store.asInstanceOf[ElementTrackingStore]
+    listener = new HiveThriftServer2Listener(kvStore, Some(server), Some(sqlContext))
     sqlContext.sparkContext.addSparkListener(listener)
     uiTab = if (sqlContext.sparkContext.getConf.get(UI_ENABLED)) {
-      Some(new ThriftServerTab(listener, getSparkUI(sqlContext.sparkContext)))
+      Some(new ThriftServerTab(new HiveThriftServer2AppStatusStore(kvStore, Some(listener)),
+        getSparkUI(sqlContext.sparkContext)))
     } else {
       None
     }
@@ -106,11 +107,13 @@ object HiveThriftServer2 extends Logging {
       server.init(executionHive.conf)
       server.start()
       logInfo("HiveThriftServer2 started")
-      listener = new LiveHiveThriftServer2Listener(server, SparkSQLEnv.sqlContext.conf,
-        SparkSQLEnv.sqlContext.sparkContext)
+      val kvStore = SparkSQLEnv.sqlContext.sparkContext
+        .statusStore.store.asInstanceOf[ElementTrackingStore]
+      listener = new HiveThriftServer2Listener(kvStore, Some(server), Some(SparkSQLEnv.sqlContext))
       SparkSQLEnv.sparkContext.addSparkListener(listener)
       uiTab = if (SparkSQLEnv.sparkContext.getConf.get(UI_ENABLED)) {
-        Some(new ThriftServerTab(listener, getSparkUI(SparkSQLEnv.sparkContext)))
+        Some(new ThriftServerTab(new HiveThriftServer2AppStatusStore(kvStore, Some(listener)),
+          getSparkUI(SparkSQLEnv.sparkContext)))
       } else {
         None
       }
@@ -147,50 +150,8 @@ object HiveThriftServer2 extends Logging {
     val STARTED, COMPILED, CANCELED, FAILED, FINISHED, CLOSED = Value
     type ExecutionState = Value
   }
-
-
-
-
-  /**
-   * An inner sparkListener called in sc.stop to clean up the HiveThriftServer2
-   */
-  private[thriftserver] class LiveHiveThriftServer2Listener(
-      val server: HiveServer2,
-      val conf: SQLConf, val sc: SparkContext) extends HiveThriftServer2Listener {
-
-    override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = {
-      server.stop()
-    }
-
-
-    private val retainedStatements = conf.getConf(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT)
-    private val retainedSessions = conf.getConf(SQLConf.THRIFTSERVER_UI_SESSION_LIMIT)
-
-
-    override def trimExecutionIfNecessary(): Unit = {
-      if (executionList.size > retainedStatements) {
-        val toRemove = math.max(retainedStatements / 10, 1)
-        executionList.filter(_._2.finishTimestamp != 0).take(toRemove).foreach { s =>
-          executionList.remove(s._1)
-        }
-      }
-    }
-
-    override def trimSessionIfNecessary(): Unit = {
-      if (sessionList.size > retainedSessions) {
-        val toRemove = math.max(retainedSessions / 10, 1)
-        sessionList.filter(_._2.finishTimestamp != 0).take(toRemove).foreach { s =>
-          sessionList.remove(s._1)
-        }
-      }
-
-    }
-
-    override def postLiveListenerBus(event: SparkListenerEvent): Unit = {
-      sc.listenerBus.post(event)
-    }
-  }
 }
+
 
 private[hive] class HiveThriftServer2(sqlContext: SQLContext)
   extends HiveServer2

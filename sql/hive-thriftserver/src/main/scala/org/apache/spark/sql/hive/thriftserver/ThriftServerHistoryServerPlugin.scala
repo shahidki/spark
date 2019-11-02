@@ -20,23 +20,19 @@ package org.apache.spark.sql.hive.thriftserver
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.SparkListener
-import org.apache.spark.sql.hive.thriftserver.ui.{HistoryHiveThriftServer2Listener, ThriftServerTab}
+import org.apache.spark.sql.hive.thriftserver.ui.{HiveThriftServer2AppStatusStore, ThriftServerTab}
 import org.apache.spark.status.{AppHistoryServerPlugin, ElementTrackingStore}
 import org.apache.spark.ui.SparkUI
 
 class ThriftServerHistoryServerPlugin extends AppHistoryServerPlugin with Logging {
-  var listener: HiveThriftServer2Listener = new HistoryHiveThriftServer2Listener()
 
   override def createListeners(conf: SparkConf, store: ElementTrackingStore): Seq[SparkListener] = {
-    Seq(listener)
+    Seq(new HiveThriftServer2Listener(store, None, None, Some(conf), false))
   }
 
   override def setupUI(ui: SparkUI): Unit = {
-    logError("listener is active size is" + listener.info.sessionList.size)
-    if (listener != null) {
-      new ThriftServerTab(listener, ui)
-      // }
-    }
+
+    new ThriftServerTab(new HiveThriftServer2AppStatusStore(ui.store.store), ui)
   }
 }
 

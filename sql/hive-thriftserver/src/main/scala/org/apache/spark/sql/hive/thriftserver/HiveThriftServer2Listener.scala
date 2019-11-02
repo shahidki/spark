@@ -17,198 +17,317 @@
 
 package org.apache.spark.sql.hive.thriftserver
 
-import scala.collection.mutable
-import org.apache.spark.SparkContext
-import org.apache.spark.internal.Logging
-import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent, SparkListenerJobStart}
-import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.{ExecutionState, SessionInfo}
+import java.util.concurrent.ConcurrentHashMap
 
+import org.apache.hive.service.server.HiveServer2
+import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
 
-// TODO: Support KVStore for HiveThriftServer2Listener
-private[thriftserver] trait HiveThriftServer2Listener extends SparkListener with Logging {
-   val info = new Info(new mutable.HashMap[String, SessionInfo],
-    new mutable.HashMap[String, ExecutionInfo])
-  protected val sessionList = info.sessionList
-  protected val executionList = info.executionList
+import org.apache.spark.{SparkConf, SparkContext}
+import org.apache.spark.scheduler.{SparkListener, SparkListenerApplicationEnd, SparkListenerEvent, SparkListenerJobStart}
+import org.apache.spark.sql.SQLContext
+import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.ExecutionState
+import org.apache.spark.sql.hive.thriftserver.ui.{ExecutionInfo, SessionInfo}
+import org.apache.spark.sql.internal.SQLConf
+import org.apache.spark.status.{ElementTrackingStore, KVUtils, LiveEntity}
 
-  def getOnlineSessionNum: Int = synchronized {
-    sessionList.count(_._2.finishTimestamp == 0)
-  }
+/**
+ * An inner sparkListener called in sc.stop to clean up the HiveThriftServer2
+ */
+private[thriftserver] class HiveThriftServer2Listener(
+  kvstore: ElementTrackingStore,
+  server: Option[HiveServer2],
+  sqlContext: Option[SQLContext],
+  sparkConf: Option[SparkConf] = None,
+  live: Boolean = true) extends SparkListener {
 
-  def isExecutionActive(execInfo: ExecutionInfo): Boolean = {
-    !(execInfo.state == ExecutionState.FAILED ||
-      execInfo.state == ExecutionState.CANCELED ||
-      execInfo.state == ExecutionState.CLOSED)
-  }
+  private val sessionList = new ConcurrentHashMap[String, LiveSessionData]()
+  private val executionList = new ConcurrentHashMap[String, LiveExecutionData]()
 
-  /**
-    * When an error or a cancellation occurs, we set the finishTimestamp of the statement.
-    * Therefore, when we count the number of running statements, we need to exclude errors and
-    * cancellations and count all statements that have not been closed so far.
-    */
-  def getTotalRunning: Int = {
-    executionList.count {
-      case (_, v) => isExecutionActive(v)
+  private val (retainedStatements: Long, retainedSessions: Long) = {
+    if (live) {
+      val conf = sqlContext.get.conf
+      (conf.getConf(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT),
+        conf.getConf(SQLConf.THRIFTSERVER_UI_SESSION_LIMIT))
+    } else {
+      val conf = sparkConf.get
+      (conf.get(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT),
+        conf.get(SQLConf.THRIFTSERVER_UI_SESSION_LIMIT), -1L)
     }
   }
 
-  def getSessionList: Seq[SessionInfo] = synchronized { sessionList.values.toSeq }
-
-  def getSession(sessionId: String): Option[SessionInfo] = {
-    sessionList.get(sessionId)
+  private val sc: Option[SparkContext] = if (live) {
+    Some(sqlContext.get.sparkContext)
+  } else {
+    None
   }
 
-  def getExecutionList: Seq[ExecutionInfo] = synchronized { executionList.values.toSeq }
+  kvstore.addTrigger(classOf[SessionInfo], retainedSessions) { count =>
+    cleanupSession(count)
+  }
 
-  override def onJobStart(jobStart: SparkListenerJobStart): Unit = synchronized {
-    for {
-      props <- Option(jobStart.properties)
-      groupId <- Option(props.getProperty(SparkContext.SPARK_JOB_GROUP_ID))
-      (_, info1) <- executionList if info1.groupId == groupId
-    } {
-      info1.jobId += jobStart.jobId.toString
-      info1.groupId = groupId
+  kvstore.addTrigger(classOf[ExecutionInfo], retainedStatements) { count =>
+    cleanupExecutions(count)
+  }
+
+  kvstore.onFlush {
+    if (!live) {
+      val now = System.nanoTime()
+      flush(update(_, now))
+    }
+  }
+
+  def postLiveListenerBus(event: SparkListenerEvent): Unit = {
+    if (live) {
+      sc.get.listenerBus.post(event)
+    }
+  }
+
+  override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = {
+    if (live && server.isDefined) {
+      server.get.stop()
+    }
+  }
+
+  override def onJobStart(jobStart: SparkListenerJobStart): Unit = {
+    if (jobStart.properties != null) {
+      val groupId = jobStart.properties.getProperty(SparkContext.SPARK_JOB_GROUP_ID)
+      if (groupId != null) {
+        executionList.values().asScala.filter(_.groupId == groupId).foreach(
+          exec => {
+            exec.jobId += jobStart.jobId.toString
+            exec.groupId = groupId
+            updateLiveStore(exec)
+          }
+        )
+      }
     }
   }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = {
-    logError("Event is " + event.toString)
     event match {
-      case e: SparkListenerSessionCreated => onSessionCreated(e.ip, e.sessionId, e.userName)
-      case e: SparkListenerSessionClosed => onSessionClosed(e.sessionId)
-      case e: SparkListenerStatementStart => onStatementStart(e.id,
-        e.sessionId,
-        e.statement,
-        e.groupId,
-        e.userName)
-      case e: SparkListenerStatementParsed => onStatementParsed(e.id, e.executionPlan)
-      case e: SparkListenerStatementCanceled => onStatementCanceled(e.id)
-      case e: SparkListenerStatementError => onStatementError(e.id, e.errorMsg,
-        e.errorTrace)
-      case e: SparkListenerStatementFinish => onStatementFinish(e.id)
-      case e: SparkListenerOperationClosed => onOperationClosed(e.id)
+      case e: SparkListenerSessionCreated => onSessionCreated(e)
+      case e: SparkListenerSessionClosed => onSessionClosed(e)
+      case e: SparkListenerStatementStart => onStatementStart(e)
+      case e: SparkListenerStatementParsed => onStatementParsed(e)
+      case e: SparkListenerStatementCanceled => onStatementCanceled(e)
+      case e: SparkListenerStatementError => onStatementError(e)
+      case e: SparkListenerStatementFinish => onStatementFinish(e)
+      case e: SparkListenerOperationClosed => onOperationClosed(e)
       case _ => // Ignore
     }
   }
 
-  def onSessionCreated(ip: String, sessionId: String,
-                       userName: String = "UNKNOWN"): Unit = {
-    synchronized {
-      logError("From history reached here")
-      val info1 = new SessionInfo(sessionId, System.currentTimeMillis, ip, userName)
-      sessionList.put(sessionId, info1)
-      logError("from history size is" + info.sessionList.size)
-      trimSessionIfNecessary()
-    }
+  def onSessionCreated(e: SparkListenerSessionCreated): Unit = {
+    val session = getOrCreateSession(e.sessionId)
+    session.ip = e.ip
+    session.startTimeStamp = System.currentTimeMillis()
+    session.username = e.userName
+    sessionList.put(e.sessionId, session)
+    updateLiveStore(session)
   }
 
-  def onSessionClosed(sessionId: String): Unit = synchronized {
-    sessionList(sessionId).finishTimestamp = System.currentTimeMillis
-    trimSessionIfNecessary()
+  def onSessionClosed(e: SparkListenerSessionClosed): Unit = {
+    val session = getOrCreateSession(e.sessionId)
+    session.finishTimestamp = System.currentTimeMillis
+    updateLiveStore(session)
   }
 
-  def onStatementStart( id: String,
-                        sessionId: String,
-                        statement: String,
-                        groupId: String,
-                        userName: String = "UNKNOWN"): Unit = synchronized {
-    val info = new ExecutionInfo(statement, sessionId, System.currentTimeMillis, userName)
+  def onStatementStart( e: SparkListenerStatementStart): Unit = {
+    val info = getOrCreateExecution(e.id,
+      e.statement,
+    e.sessionId,
+    System.currentTimeMillis,
+    e.userName)
+
     info.state = ExecutionState.STARTED
-    executionList.put(id, info)
-    trimExecutionIfNecessary()
-    sessionList(sessionId).totalExecution += 1
-    executionList(id).groupId = groupId
+    executionList.put(e.id, info)
+    sessionList.get(e.sessionId).totalExecution += 1
+    executionList.get(e.id).groupId = e.groupId
+    updateLiveStore(executionList.get(e.id))
+    updateLiveStore(sessionList.get(e.sessionId))
   }
 
-  def onStatementParsed(id: String, executionPlan: String): Unit = synchronized {
-    executionList(id).executePlan = executionPlan
-    executionList(id).state = ExecutionState.COMPILED
+  def onStatementParsed(e: SparkListenerStatementParsed): Unit = {
+    executionList.get(e.id).executePlan = e.executionPlan
+    executionList.get(e.id).state = ExecutionState.COMPILED
+    updateLiveStore(executionList.get(e.id))
   }
 
-  def onStatementCanceled(id: String): Unit = synchronized {
-    executionList(id).finishTimestamp = System.currentTimeMillis
-    executionList(id).state = ExecutionState.CANCELED
-    trimExecutionIfNecessary()
+  def onStatementCanceled(e: SparkListenerStatementCanceled): Unit = {
+    executionList.get(e.id).finishTimestamp = System.currentTimeMillis
+    executionList.get(e.id).state = ExecutionState.CANCELED
+    updateLiveStore(executionList.get(e.id))
   }
 
-  def onStatementError(id: String, errorMsg: String,
-                       errorTrace: String): Unit = synchronized {
-    executionList(id).finishTimestamp = System.currentTimeMillis
-    executionList(id).detail = errorMsg
-    executionList(id).state = ExecutionState.FAILED
-    trimExecutionIfNecessary()
+  def onStatementError(e: SparkListenerStatementError): Unit = {
+    executionList.get(e.id).finishTimestamp = System.currentTimeMillis
+    executionList.get(e.id).detail = e.errorMsg
+    executionList.get(e.id).state = ExecutionState.FAILED
+    updateLiveStore(executionList.get(e.id))
   }
 
-  def onStatementFinish(id: String): Unit = synchronized {
-    executionList(id).finishTimestamp = System.currentTimeMillis
-    executionList(id).state = ExecutionState.FINISHED
-    trimExecutionIfNecessary()
+  def onStatementFinish(e: SparkListenerStatementFinish): Unit = {
+    executionList.get(e.id).finishTimestamp = System.currentTimeMillis
+    executionList.get(e.id).state = ExecutionState.FINISHED
+    updateLiveStore(executionList.get(e.id))
   }
 
-  def onOperationClosed(id: String): Unit = synchronized {
-    executionList(id).closeTimestamp = System.currentTimeMillis
-    executionList(id).state = ExecutionState.CLOSED
-  }
-  def trimExecutionIfNecessary(): Unit = {
-
+  def onOperationClosed(e: SparkListenerOperationClosed): Unit = {
+    executionList.get(e.id).closeTimestamp = System.currentTimeMillis
+    executionList.get(e.id).state = ExecutionState.CLOSED
+    updateLiveStore(executionList.get(e.id))
   }
 
-  def trimSessionIfNecessary(): Unit = {
-
+  /** Go through all `LiveEntity`s and use `entityFlushFunc(entity)` to flush them. */
+  private def flush(entityFlushFunc: LiveEntity => Unit): Unit = {
+    sessionList.values.asScala.foreach(entityFlushFunc)
+    executionList.values.asScala.foreach(entityFlushFunc)
   }
 
-  def postLiveListenerBus(event: SparkListenerEvent): Unit = {
-
+  private def update(entity: LiveEntity, now: Long): Unit = {
+    entity.write(kvstore, now)
   }
 
-}
+  def updateLiveStore(session: LiveEntity): Unit = {
+    if (live) {
+      session.write(kvstore, System.nanoTime())
+    }
+  }
 
-class Info (val sessionList: mutable.HashMap[String, SessionInfo],
-            val executionList: mutable.HashMap[String, ExecutionInfo])
+  private def getOrCreateSession(sessionId: String): LiveSessionData = {
+    sessionList.computeIfAbsent(sessionId,
+      (_: String) => new LiveSessionData(sessionId))
+  }
 
-private[thriftserver] class ExecutionInfo(
-                                           val statement: String,
-                                           val sessionId: String,
-                                           val startTimestamp: Long,
-                                           val userName: String) {
-  var finishTimestamp: Long = 0L
-  var closeTimestamp: Long = 0L
-  var executePlan: String = ""
-  var detail: String = ""
-  var state: ExecutionState.Value = ExecutionState.STARTED
-  val jobId: ArrayBuffer[String] = ArrayBuffer[String]()
-  var groupId: String = ""
-  def totalTime(endTime: Long): Long = {
-    if (endTime == 0L) {
-      System.currentTimeMillis - startTimestamp
+  private def getOrCreateExecution(
+    execId: String, statement: String,
+    sessionId: String, startTimestamp: Long,
+    userName: String): LiveExecutionData = {
+    executionList.computeIfAbsent(execId,
+      (_: String) => new LiveExecutionData(execId, statement, sessionId, startTimestamp, userName))
+  }
+
+  private def cleanupExecutions(count: Long): Unit = {
+    val countToDelete = calculateNumberToRemove(count, retainedStatements)
+    if (countToDelete <= 0L) {
+      return
+    }
+    val view = kvstore.view(classOf[ExecutionInfo]).index("execId").first(0L)
+    val toDelete = KVUtils.viewToSeq(view, countToDelete.toInt) { j =>
+      j.finishTimestamp != 0
+    }
+    toDelete.foreach { j => kvstore.delete(j.getClass(), j.execId) }
+  }
+
+  private def cleanupSession(count: Long): Unit = {
+    val countToDelete = calculateNumberToRemove(count, retainedSessions)
+    if (countToDelete <= 0L) {
+      return
+    }
+    val view = kvstore.view(classOf[SessionInfo]).index("sessionId").first(0L)
+    val toDelete = KVUtils.viewToSeq(view, countToDelete.toInt) { j =>
+      j.finishTimestamp != 0L
+    }
+    toDelete.foreach { j => kvstore.delete(j.getClass(), j.sessionId) }
+  }
+
+  /**
+    * Remove at least (retainedSize / 10) items to reduce friction. Because tracking may be done
+    * asynchronously, this method may return 0 in case enough items have been deleted already.
+    */
+  private def calculateNumberToRemove(dataSize: Long, retainedSize: Long): Long = {
+    if (dataSize > retainedSize) {
+      math.max(retainedSize / 10L, dataSize - retainedSize)
     } else {
-      endTime - startTimestamp
+      0L
     }
   }
 }
-case class SparkListenerSessionCreated(ip: String, sessionId: String, userName: String)
-  extends SparkListenerEvent
 
-case class SparkListenerSessionClosed(sessionId: String) extends SparkListenerEvent
+private[thriftserver] class LiveExecutionData(
+    val execId: String,
+    val statement: String,
+    val sessionId: String,
+    val startTimestamp: Long,
+    val userName: String) extends LiveEntity {
 
-case class SparkListenerStatementStart(
-              id: String,
-              sessionId: String,
-              statement: String,
-              groupId: String,
-              userName: String = "UNKNOWN") extends SparkListenerEvent
+    var finishTimestamp: Long = 0L
+    var closeTimestamp: Long = 0L
+    var executePlan: String = ""
+    var detail: String = ""
+    var state: ExecutionState.Value = ExecutionState.STARTED
+    val jobId: ArrayBuffer[String] = ArrayBuffer[String]()
+    var groupId: String = ""
 
-case class SparkListenerStatementParsed(id: String, executionPlan: String)
-  extends SparkListenerEvent
+  override protected def doUpdate(): Any = {
+    new ExecutionInfo(
+      execId,
+      statement,
+      sessionId,
+      startTimestamp,
+      userName,
+      finishTimestamp,
+      closeTimestamp,
+      executePlan,
+      detail,
+      state,
+      jobId,
+      groupId)
+  }
+}
 
-case class SparkListenerStatementCanceled(id: String) extends SparkListenerEvent
+private[thriftserver] class LiveSessionData(val sessionId: String) extends LiveEntity {
 
-case class SparkListenerStatementError(id: String, errorMsg: String, errorTrace: String)
-  extends SparkListenerEvent
+  var description: String = null
+  var username: String = null
+  var ip: String = null
 
-case class SparkListenerStatementFinish(id: String) extends SparkListenerEvent
+  var startTimeStamp = -1L
+  var finishTimestamp: Long = 0L
+  var totalExecution: Int = 0
 
-case class SparkListenerOperationClosed(id: String) extends SparkListenerEvent
+  override protected def doUpdate(): Any = {
+    new SessionInfo(
+      sessionId,
+      startTimeStamp,
+      ip,
+      username,
+      finishTimestamp,
+      totalExecution)
+  }
+
+}
+
+private[thriftserver] case class SparkListenerSessionCreated(
+    ip: String,
+    sessionId: String,
+    userName: String) extends SparkListenerEvent
+
+private[thriftserver] case class SparkListenerSessionClosed(
+    sessionId: String) extends SparkListenerEvent
+
+private[thriftserver] case class SparkListenerStatementStart(
+    id: String,
+    sessionId: String,
+    statement: String,
+    groupId: String,
+    userName: String = "UNKNOWN") extends SparkListenerEvent
+
+private[thriftserver] case class SparkListenerStatementParsed(
+    id: String,
+    executionPlan: String) extends SparkListenerEvent
+
+private[thriftserver] case class SparkListenerStatementCanceled(
+    id: String) extends SparkListenerEvent
+
+private[thriftserver] case class SparkListenerStatementError(
+    id: String,
+    errorMsg: String,
+    errorTrace: String) extends SparkListenerEvent
+
+private[thriftserver] case class SparkListenerStatementFinish(id: String) extends SparkListenerEvent
+
+private[thriftserver] case class SparkListenerOperationClosed(id: String) extends SparkListenerEvent
 
 
