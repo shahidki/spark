@@ -23,7 +23,7 @@ import scala.collection.mutable.ArrayBuffer
 import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.ExecutionState
 import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2Listener
 import org.apache.spark.status.KVUtils.KVIndexParam
-import org.apache.spark.util.kvstore.{KVIndex, KVStore}
+import org.apache.spark.util.kvstore.KVStore
 
 /**
  * Provides a view of a KVStore with methods that make it easy to query SQL-specific state. There's
@@ -33,11 +33,11 @@ class HiveThriftServer2AppStatusStore(
     store: KVStore,
     val listener: Option[HiveThriftServer2Listener] = None) {
 
-  def getSessionList(): Seq[SessionInfo] = {
+  def getSessionList: Seq[SessionInfo] = {
     store.view(classOf[SessionInfo]).asScala.toSeq
   }
 
-  def getExecutionList(): Seq[ExecutionInfo] = {
+  def getExecutionList: Seq[ExecutionInfo] = {
     store.view(classOf[ExecutionInfo]).asScala.toSeq
   }
 
@@ -46,17 +46,21 @@ class HiveThriftServer2AppStatusStore(
   }
 
   def getSession(sessionId: String): Option[SessionInfo] = {
-    Some(store.read(classOf[SessionInfo], sessionId))
+    try {
+      Some(store.read(classOf[SessionInfo], sessionId))
+    } catch {
+      case _: NoSuchElementException => None
+    }
+  }
+
+  def getTotalRunning: Int = {
+    store.view(classOf[ExecutionInfo]).asScala.count(isExecutionActive)
   }
 
   def isExecutionActive(execInfo: ExecutionInfo): Boolean = {
     !(execInfo.state == ExecutionState.FAILED ||
       execInfo.state == ExecutionState.CANCELED ||
       execInfo.state == ExecutionState.CLOSED)
-  }
-
-  def getTotalRunning: Int = {
-    store.view(classOf[ExecutionInfo]).asScala.count(isExecutionActive)
   }
 }
 

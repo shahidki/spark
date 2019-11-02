@@ -44,7 +44,7 @@ private[thriftserver] class HiveThriftServer2Listener(
   private val sessionList = new ConcurrentHashMap[String, LiveSessionData]()
   private val executionList = new ConcurrentHashMap[String, LiveExecutionData]()
 
-  private val (retainedStatements: Long, retainedSessions: Long) = {
+  private val (retainedStatements: Int, retainedSessions: Int) = {
     if (live) {
       val conf = sqlContext.get.conf
       (conf.getConf(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT),
@@ -52,7 +52,7 @@ private[thriftserver] class HiveThriftServer2Listener(
     } else {
       val conf = sparkConf.get
       (conf.get(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT),
-        conf.get(SQLConf.THRIFTSERVER_UI_SESSION_LIMIT), -1L)
+        conf.get(SQLConf.THRIFTSERVER_UI_SESSION_LIMIT))
     }
   }
 
