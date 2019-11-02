@@ -25,7 +25,6 @@ import org.apache.hadoop.hive.conf.HiveConf.ConfVars
 import org.apache.hive.service.cli.SessionHandle
 import org.apache.hive.service.cli.session.SessionManager
 import org.apache.hive.service.server.HiveServer2
-
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.hive.HiveUtils
 import org.apache.spark.sql.hive.thriftserver.ReflectionUtils._
@@ -55,8 +54,9 @@ private[hive] class SparkSQLSessionManager(hiveServer: HiveServer2, sqlContext: 
       super.openSession(protocol, username, passwd, ipAddress, sessionConf, withImpersonation,
           delegationToken)
     val session = super.getSession(sessionHandle)
-    HiveThriftServer2.listener.onSessionCreated(
-      session.getIpAddress, sessionHandle.getSessionId.toString, session.getUsername)
+
+    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerSessionCreated(
+      session.getIpAddress, sessionHandle.getSessionId.toString, session.getUsername))
     val ctx = if (sqlContext.conf.hiveThriftServerSingleSession) {
       sqlContext
     } else {
@@ -74,7 +74,7 @@ private[hive] class SparkSQLSessionManager(hiveServer: HiveServer2, sqlContext: 
   }
 
   override def closeSession(sessionHandle: SessionHandle): Unit = {
-    HiveThriftServer2.listener.onSessionClosed(sessionHandle.getSessionId.toString)
+    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerSessionClosed(sessionHandle.getSessionId.toString))
     super.closeSession(sessionHandle)
     sparkSqlOperationManager.sessionToActivePool.remove(sessionHandle)
     sparkSqlOperationManager.sessionToContexts.remove(sessionHandle)

@@ -54,7 +54,7 @@ private[hive] class SparkGetFunctionsOperation(
 
   override def close(): Unit = {
     super.close()
-    HiveThriftServer2.listener.onOperationClosed(statementId)
+    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerOperationClosed(statementId))
   }
 
   override def runInternal(): Unit = {
@@ -81,12 +81,12 @@ private[hive] class SparkGetFunctionsOperation(
       authorizeMetaGets(HiveOperationType.GET_FUNCTIONS, privObjs, cmdStr)
     }
 
-    HiveThriftServer2.listener.onStatementStart(
+    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementStart(
       statementId,
       parentSession.getSessionHandle.getSessionId.toString,
       logMsg,
       statementId,
-      parentSession.getUsername)
+      parentSession.getUsername))
 
     try {
       matchingDbs.foreach { db =>
@@ -110,16 +110,16 @@ private[hive] class SparkGetFunctionsOperation(
         setState(OperationState.ERROR)
         e match {
           case hiveException: HiveSQLException =>
-            HiveThriftServer2.listener.onStatementError(
-              statementId, hiveException.getMessage, SparkUtils.exceptionString(hiveException))
+            HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementError(
+              statementId, hiveException.getMessage, SparkUtils.exceptionString(hiveException)))
             throw hiveException
           case _ =>
             val root = ExceptionUtils.getRootCause(e)
-            HiveThriftServer2.listener.onStatementError(
-              statementId, root.getMessage, SparkUtils.exceptionString(root))
+            HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementError(
+              statementId, root.getMessage, SparkUtils.exceptionString(root)))
             throw new HiveSQLException("Error getting functions: " + root.toString, root)
         }
     }
-    HiveThriftServer2.listener.onStatementFinish(statementId)
+    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementFinish(statementId))
   }
 }

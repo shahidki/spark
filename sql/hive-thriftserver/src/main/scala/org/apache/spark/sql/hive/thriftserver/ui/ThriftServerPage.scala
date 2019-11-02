@@ -20,15 +20,15 @@ package org.apache.spark.sql.hive.thriftserver.ui
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.util.Calendar
+
 import javax.servlet.http.HttpServletRequest
 
 import scala.collection.JavaConverters._
 import scala.xml.{Node, Unparsed}
-
 import org.apache.commons.text.StringEscapeUtils
-
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.{ExecutionInfo, SessionInfo}
+import org.apache.spark.sql.hive.thriftserver.ExecutionInfo
+import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.SessionInfo
 import org.apache.spark.sql.hive.thriftserver.ui.ToolTips._
 import org.apache.spark.ui._
 import org.apache.spark.ui.UIUtils._
@@ -36,14 +36,13 @@ import org.apache.spark.util.Utils
 
 /** Page for Spark Web UI that shows statistics of the thrift server */
 private[ui] class ThriftServerPage(parent: ThriftServerTab) extends WebUIPage("") with Logging {
-
+  // private val store = parent.store
   private val listener = parent.listener
   private val startTime = Calendar.getInstance().getTime()
 
   /** Render the page */
   def render(request: HttpServletRequest): Seq[Node] = {
-    val content =
-      listener.synchronized { // make sure all parts in this page are consistent
+    val content = // make sure all parts in this page are consistent
         generateBasicStats() ++
         <br/> ++
         <h4>
@@ -52,7 +51,6 @@ private[ui] class ThriftServerPage(parent: ThriftServerTab) extends WebUIPage(""
         </h4> ++
         generateSessionStatsTable(request) ++
         generateSQLStatsTable(request)
-      }
     UIUtils.headerSparkPage(request, "JDBC/ODBC Server", content, parent)
   }
 
