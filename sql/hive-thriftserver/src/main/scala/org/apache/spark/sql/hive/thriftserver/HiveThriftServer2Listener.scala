@@ -128,17 +128,20 @@ private[thriftserver] class HiveThriftServer2Listener(
   }
 
   def onSessionClosed(e: SparkListenerSessionClosed): Unit = {
-    val session = getOrCreateSession(e.sessionId)
+    val session = sessionList.get(e.sessionId)
     session.finishTimestamp = System.currentTimeMillis
     updateLiveStore(session)
+    sessionList.remove(e.sessionId)
   }
 
   def onStatementStart( e: SparkListenerStatementStart): Unit = {
-    val info = getOrCreateExecution(e.id,
+    val info =
+      getOrCreateExecution(
+      e.id,
       e.statement,
-    e.sessionId,
-    System.currentTimeMillis,
-    e.userName)
+      e.sessionId,
+      System.currentTimeMillis,
+      e.userName)
 
     info.state = ExecutionState.STARTED
     executionList.put(e.id, info)
@@ -177,6 +180,7 @@ private[thriftserver] class HiveThriftServer2Listener(
     executionList.get(e.id).closeTimestamp = System.currentTimeMillis
     executionList.get(e.id).state = ExecutionState.CLOSED
     updateLiveStore(executionList.get(e.id))
+    executionList.remove(e.id)
   }
 
   /** Go through all `LiveEntity`s and use `entityFlushFunc(entity)` to flush them. */
