@@ -54,7 +54,8 @@ private[hive] class SparkGetFunctionsOperation(
 
   override def close(): Unit = {
     super.close()
-    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerOperationClosed(statementId))
+    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerOperationClosed(statementId,
+      System.currentTimeMillis()))
   }
 
   override def runInternal(): Unit = {
@@ -86,6 +87,7 @@ private[hive] class SparkGetFunctionsOperation(
       parentSession.getSessionHandle.getSessionId.toString,
       logMsg,
       statementId,
+      System.currentTimeMillis(),
       parentSession.getUsername))
 
     try {
@@ -111,15 +113,18 @@ private[hive] class SparkGetFunctionsOperation(
         e match {
           case hiveException: HiveSQLException =>
             HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementError(
-              statementId, hiveException.getMessage, SparkUtils.exceptionString(hiveException)))
+              statementId, hiveException.getMessage, SparkUtils.exceptionString(hiveException),
+              System.currentTimeMillis()))
             throw hiveException
           case _ =>
             val root = ExceptionUtils.getRootCause(e)
             HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementError(
-              statementId, root.getMessage, SparkUtils.exceptionString(root)))
+              statementId, root.getMessage, SparkUtils.exceptionString(root),
+              System.currentTimeMillis()))
             throw new HiveSQLException("Error getting functions: " + root.toString, root)
         }
     }
-    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementFinish(statementId))
+    HiveThriftServer2.listener.postLiveListenerBus(SparkListenerStatementFinish(statementId,
+      System.currentTimeMillis()))
   }
 }
