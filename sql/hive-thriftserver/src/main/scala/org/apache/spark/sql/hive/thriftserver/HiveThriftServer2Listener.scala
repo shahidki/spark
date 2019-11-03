@@ -119,10 +119,7 @@ private[thriftserver] class HiveThriftServer2Listener(
   }
 
   def onSessionCreated(e: SparkListenerSessionCreated): Unit = {
-    val session = getOrCreateSession(e.sessionId)
-    session.ip = e.ip
-    session.startTimeStamp = System.currentTimeMillis()
-    session.username = e.userName
+    val session = getOrCreateSession(e.sessionId, System.currentTimeMillis(), e.ip, e.userName)
     sessionList.put(e.sessionId, session)
     updateLiveStore(session)
   }
@@ -199,9 +196,13 @@ private[thriftserver] class HiveThriftServer2Listener(
     }
   }
 
-  private def getOrCreateSession(sessionId: String): LiveSessionData = {
+  private def getOrCreateSession(
+     sessionId: String,
+     startTime: Long,
+     ip: String,
+     username: String): LiveSessionData = {
     sessionList.computeIfAbsent(sessionId,
-      (_: String) => new LiveSessionData(sessionId))
+      (_: String) => new LiveSessionData(sessionId, startTime, ip, username))
   }
 
   private def getOrCreateExecution(
@@ -281,13 +282,13 @@ private[thriftserver] class LiveExecutionData(
   }
 }
 
-private[thriftserver] class LiveSessionData(val sessionId: String) extends LiveEntity {
 
-  var description: String = null
-  var username: String = null
-  var ip: String = null
+private[thriftserver] class LiveSessionData(
+    val sessionId: String,
+    val startTimeStamp: Long,
+    val ip: String,
+    val username: String) extends LiveEntity {
 
-  var startTimeStamp = -1L
   var finishTimestamp: Long = 0L
   var totalExecution: Int = 0
 

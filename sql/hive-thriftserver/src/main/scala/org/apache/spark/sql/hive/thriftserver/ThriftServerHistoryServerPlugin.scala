@@ -31,8 +31,10 @@ class ThriftServerHistoryServerPlugin extends AppHistoryServerPlugin with Loggin
   }
 
   override def setupUI(ui: SparkUI): Unit = {
-
-    new ThriftServerTab(new HiveThriftServer2AppStatusStore(ui.store.store), ui)
+    val store = new HiveThriftServer2AppStatusStore(ui.store.store)
+    if (store.getSessionList.nonEmpty) {
+      new ThriftServerTab(store, ui)
+    }
   }
 }
 

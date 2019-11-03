@@ -52,7 +52,11 @@ class HiveThriftServer2AppStatusStore(
       case _: NoSuchElementException => None
     }
   }
-
+  /**
+   * When an error or a cancellation occurs, we set the finishTimestamp of the statement.
+   * Therefore, when we count the number of running statements, we need to exclude errors and
+   * cancellations and count all statements that have not been closed so far.
+   */
   def getTotalRunning: Int = {
     store.view(classOf[ExecutionInfo]).asScala.count(isExecutionActive)
   }
