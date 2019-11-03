@@ -224,29 +224,6 @@ class SingleFileEventLogFileReaderSuite extends EventLogFileReadersSuite {
       assert(is.getNextEntry === null)
     }
   }
-
-  test("test") {
-    val appId = getUniqueApplicationId
-    val attemptId = None
-
-    val conf = getLoggingConf(testDirPath)
-
-    val writer = createWriter(appId, attemptId, testDirPath.toUri, conf,
-      SparkHadoopUtil.get.newConfiguration(conf))
-
-    writer.start()
-
-    // write log more than 20m (intended to roll over to 3 files)
-    val dummyStr = "dummy" * 1024
-    writeTestEvents(writer, dummyStr, 1024 * 1024 * 20)
-
-    val logPathIncompleted = getCurrentLogPath(writer.logPath, isCompleted = false)
-    val readerOpt = EventLogFileReader(fileSystem,
-      new Path(logPathIncompleted))
-
-    fileSystem.delete(new Path(logPathIncompleted))
-    writer.stop()
-  }
 }
 
 class RollingEventLogFilesReaderSuite extends EventLogFileReadersSuite {

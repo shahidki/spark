@@ -45,7 +45,7 @@ private[spark] object History {
     .timeConf(TimeUnit.SECONDS)
     .createWithDefaultString("1d")
 
-    val MAX_LOG_AGE_S = ConfigBuilder("spark.history.fs.cleaner.maxAge")
+  val MAX_LOG_AGE_S = ConfigBuilder("spark.history.fs.cleaner.maxAge")
     .timeConf(TimeUnit.SECONDS)
     .createWithDefaultString("7d")
 
