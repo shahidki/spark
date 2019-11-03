@@ -1,1 +1,1 @@
-org.apache.spark.sql.hive.thriftserver.ThriftServerHistoryServerPlugin
+org.apache.spark.sql.hive.thriftserver.HiveThriftServer2HistoryServerPlugin

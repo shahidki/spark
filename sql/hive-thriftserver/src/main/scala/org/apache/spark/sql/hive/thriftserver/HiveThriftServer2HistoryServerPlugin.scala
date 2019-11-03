@@ -18,13 +18,12 @@
 package org.apache.spark.sql.hive.thriftserver
 
 import org.apache.spark.SparkConf
-import org.apache.spark.internal.Logging
 import org.apache.spark.scheduler.SparkListener
 import org.apache.spark.sql.hive.thriftserver.ui.{HiveThriftServer2AppStatusStore, ThriftServerTab}
 import org.apache.spark.status.{AppHistoryServerPlugin, ElementTrackingStore}
 import org.apache.spark.ui.SparkUI
 
-class ThriftServerHistoryServerPlugin extends AppHistoryServerPlugin with Logging {
+class HiveThriftServer2HistoryServerPlugin extends AppHistoryServerPlugin {
 
   override def createListeners(conf: SparkConf, store: ElementTrackingStore): Seq[SparkListener] = {
     Seq(new HiveThriftServer2Listener(store, None, None, Some(conf), false))
@@ -32,7 +31,7 @@ class ThriftServerHistoryServerPlugin extends AppHistoryServerPlugin with Loggin
 
   override def setupUI(ui: SparkUI): Unit = {
     val store = new HiveThriftServer2AppStatusStore(ui.store.store)
-    if (store.getSessionList.nonEmpty) {
+    if (store.getExecutionCount() > 0) {
       new ThriftServerTab(store, ui)
     }
   }

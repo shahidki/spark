@@ -66,6 +66,14 @@ class HiveThriftServer2AppStatusStore(
       execInfo.state == ExecutionState.CANCELED ||
       execInfo.state == ExecutionState.CLOSED)
   }
+
+  def getSessionCount(): Long = {
+    store.count(classOf[SessionInfo])
+  }
+
+  def getExecutionCount(): Long = {
+    store.count(classOf[ExecutionInfo])
+  }
 }
 
 private[thriftserver] class SessionInfo(
