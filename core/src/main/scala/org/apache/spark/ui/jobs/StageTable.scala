@@ -40,7 +40,7 @@ private[ui] class StageTableBase(
     stageTag: String,
     basePath: String,
     subPath: String,
-    isFairScheduler: Boolean,
+    showPoolInfo: Boolean,
     killEnabled: Boolean,
     isFailedStage: Boolean) {
   val parameterOtherTable = request.getParameterMap().asScala
@@ -72,7 +72,7 @@ private[ui] class StageTableBase(
       stageTag,
       basePath,
       subPath,
-      isFairScheduler,
+      showPoolInfo,
       killEnabled,
       currentTime,
       stagePageSize,
@@ -128,7 +128,7 @@ private[ui] class StagePagedTable(
     stageTag: String,
     basePath: String,
     subPath: String,
-    isFairScheduler: Boolean,
+    showPoolInfo: Boolean,
     killEnabled: Boolean,
     currentTime: Long,
     pageSize: Int,
@@ -181,7 +181,7 @@ private[ui] class StagePagedTable(
     // Otherwise, it has two parts: tooltip text, and position (true for left, false for default).
     val stageHeadersAndCssClasses: Seq[(String, Option[(String, Boolean)], Boolean)] =
       Seq(("Stage Id", None, true)) ++
-      {if (isFairScheduler) {Seq(("Pool Name", None, true))} else Seq.empty} ++
+      {if (showPoolInfo) {Seq(("Pool Name", None, true))} else Seq.empty} ++
       Seq(
         ("Description", None, true), ("Submitted", None, true), ("Duration", None, true),
         ("Tasks: Succeeded/Total", None, false),
@@ -272,7 +272,7 @@ private[ui] class StagePagedTable(
         } else {
           <td>{data.stageId}</td>
         }} ++
-        {if (isFairScheduler) {
+        {if (showPoolInfo) {
           <td>
             <a href={"%s/stages/pool?poolname=%s"
               .format(UIUtils.prependBaseUri(request, basePath), data.schedulingPool)}>
@@ -379,7 +379,7 @@ private[ui] class StagePagedTable(
 
   protected def missingStageRow(stageId: Int): Seq[Node] = {
     <td>{stageId}</td> ++
-    {if (isFairScheduler) {<td>-</td>} else Seq.empty} ++
+    {if (showPoolInfo) {<td>-</td>} else Seq.empty} ++
     <td>No data available for this stage</td> ++ // Description
     <td></td> ++ // Submitted
     <td></td> ++ // Duration
