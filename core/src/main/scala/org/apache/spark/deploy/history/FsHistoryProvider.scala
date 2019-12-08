@@ -29,7 +29,6 @@ import scala.collection.mutable
 import scala.concurrent.ExecutionException
 import scala.io.Source
 import scala.xml.Node
-
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import com.google.common.util.concurrent.MoreExecutors
@@ -38,7 +37,6 @@ import org.apache.hadoop.hdfs.DistributedFileSystem
 import org.apache.hadoop.hdfs.protocol.HdfsConstants
 import org.apache.hadoop.security.AccessControlException
 import org.fusesource.leveldbjni.internal.NativeDB
-
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
@@ -127,9 +125,10 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
   private val pendingReplayTasksCount = new java.util.concurrent.atomic.AtomicInteger(0)
 
-  private val incrimentInMemoryStore = new ConcurrentHashMap[(String, Option[String]), KVStore]();
+  private val storeMap = new ConcurrentHashMap[(String, Option[String]), KVStore]()
   private val storePath = conf.get(LOCAL_STORE_DIR).map(new File(_))
   private val fastInProgressParsing = conf.get(FAST_IN_PROGRESS_PARSING)
+  private val isIncrementalParsingEnabled = conf.get(History.INCREMENTAL_PARSING_ENABLED)
 
   // Visible for testing.
   private[history] val listing: KVStore = storePath.map { path =>
@@ -680,7 +679,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
     logInfo(s"Parsing $logPath for listing data...")
     val logFiles = reader.listEventLogFiles
-    parseAppEventLogs(logFiles, bus, !appCompleted, false, eventsFilter)
+    parseAppEventLogs(logFiles, bus, !appCompleted, None, eventsFilter)
 
     // If enabled above, the listing listener will halt parsing when there's enough information to
     // create a listing entry. When the app is completed, or fast parsing is disabled, we still need
@@ -931,9 +930,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   /**
    * Rebuilds the application state store from its event log.
    */
-  private def rebuildAppStore(
-                             appId: String,
-                             attemptId: Option[String],
+  private def rebuildAppStore(appId: String, attemptId: Option[String],
       store: KVStore,
       reader: EventLogFileReader,
       lastUpdated: Long): Unit = {
@@ -956,9 +953,20 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       replayBus.addListener(listener)
     }
 
+    val info: Option[IncrimentInfo] = try {
+      if (isIncrementalParsingEnabled) {
+        Some(listing.read(classOf[IncrimentInfo], appId + "/" + attemptId))
+      } else None
+    } catch {
+      case _: Exception =>
+        val info = IncrimentInfo(appId, attemptId, 0, -1)
+        listing.write(info)
+        Some(info)
+    }
+
     try {
       logInfo(s"Parsing ${reader.rootPath} to re-build UI...")
-      parseAppEventLogs(reader.listEventLogFiles, replayBus, !reader.completed, true)
+      parseAppEventLogs(reader.listEventLogFiles, replayBus, !reader.completed, info)
       trackingStore.close(false)
       logInfo(s"Finished parsing ${reader.rootPath}")
     } catch {
@@ -974,47 +982,36 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       logFiles: Seq[FileStatus],
       replayBus: ReplayListenerBus,
       maybeTruncated: Boolean,
-      rebuild: Boolean = false,
+      info: Option[IncrimentInfo] = None,
       eventsFilter: ReplayEventsFilter = SELECT_ALL_FILTER): Unit = {
     // stop replaying next log files if ReplayListenerBus indicates some error or halt
     var continueReplay = true
+    var lineToSkip = if (info.isDefined) {
+      info.get.lineToSkip
+    } else -1
+    var fileIndex = if (info.isDefined) {
+      info.get.fileIndex
+    } else 0
+    var index = 0
     logFiles.foreach { file =>
-      val incInfo = getIncrementalInfo(file.getPath.toString)
-      val skipReplay = incInfo._1
-      val lineToSkip = incInfo._2
-      if (!skipReplay && continueReplay) {
+      if (continueReplay && fileIndex >= index) {
         Utils.tryWithResource(EventLogFileReader.openEventLog(file.getPath, fs)) { in =>
           val result = replayBus.replay(in, file.getPath.toString,
             maybeTruncated = maybeTruncated, eventsFilter = eventsFilter, lineToSkip)
           continueReplay = result.success
-          val skipFile = result.success && file.getPath != logFiles.last.getPath
-          updateIncrementalInfo(file.getPath.toString, result.linesRead, skipFile)
+          if (info.isDefined) {
+            lineToSkip += result.linesRead
         }
-      }
-    }
-
-    def updateIncrementalInfo(path: String, lineToSkip: Int, completed: Boolean): Unit = {
-      if (rebuild && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-        listing.write(IncrimentInfo(path, completed, lineToSkip))
-      }
-    }
-
-    def getIncrementalInfo(path: String): (Boolean, Int) = {
-      try {
-        if (rebuild && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-          val info = listing.read(classOf[IncrimentInfo], path)
-          if (info.isCompleted) {
-            (true, info.lineToSkip)
-          } else {
-            (false, info.lineToSkip)
+          if (continueReplay) {
+            index += 1
           }
-        } else {
-          (false, -1)
         }
-      } catch {
-        case _: Exception =>
-          (false, -1)
       }
+
+    }
+      if (info.isDefined && isIncrementalParsingEnabled) {
+        info.get.copy(fileIndex = index, lineToSkip = lineToSkip)
+        listing.write(info.get)
     }
   }
 
@@ -1087,66 +1084,63 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
     def getStore: LevelDB = {
       dm.openStore(appId, attempt.info.attemptId).foreach { path =>
-      try {
-      return KVUtils.open(path, metadata)
-    } catch {
-      case e: Exception =>
-      logInfo(s"Failed to open existing store for $appId/${attempt.info.attemptId}.", e)
-      dm.release(appId, attempt.info.attemptId, delete = true)
+        try {
+          return KVUtils.open(path, metadata)
+        } catch {
+          case e: Exception =>
+            logInfo(s"Failed to open existing store for $appId/${attempt.info.attemptId}.", e)
+            dm.release(appId, attempt.info.attemptId, delete = true)
+        }
       }
-    }
       // At this point the disk data either does not exist or was deleted because it failed to
       // load, so the event log needs to be replayed.
 
       val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
-      attempt.lastIndex)
+        attempt.lastIndex)
       val isCompressed = reader.compressionCodec.isDefined
       logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
       val lease = dm.lease(reader.totalSize, isCompressed)
       val newStorePath = try {
-      Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
-      rebuildAppStore("", None,
-      store, reader, attempt.info.lastUpdated.getTime())
-    }
-      lease.commit(appId, attempt.info.attemptId)
-    } catch {
-      case e: Exception =>
-      lease.rollback()
-      throw e
-    }
+        Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
+          rebuildAppStore("", None,
+            store, reader, attempt.info.lastUpdated.getTime())
+        }
+        lease.commit(appId, attempt.info.attemptId)
+      } catch {
+        case e: Exception =>
+          lease.rollback()
+          throw e
+      }
 
       KVUtils.open(newStorePath, metadata)
     }
     // First check if the store already exists and try to open it. If that fails, then get rid of
     // the existing data.
-    if (!conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-       getStore
+    if (!isIncrementalParsingEnabled) {
+      getStore
     } else {
-
       try {
-        val store: KVStore = incrimentInMemoryStore.get((appId, attempt.info.attemptId))
+        val store: KVStore = storeMap.get((appId, attempt.info.attemptId))
         require(store != null)
         val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
           attempt.lastIndex)
         logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
         rebuildAppStore(appId, attempt.info.attemptId, store, reader,
           attempt.info.lastUpdated.getTime)
-        incrimentInMemoryStore.put((appId, attempt.info.attemptId), store)
+        storeMap.put((appId, attempt.info.attemptId), store)
         store
       } catch {
         case _: Exception =>
-         // store.close()
-          val store1 = getStore
-          incrimentInMemoryStore.put((appId, attempt.info.attemptId), store1)
-          store1
+          val store = getStore
+          storeMap.put((appId, attempt.info.attemptId), store)
+          store
       }
     }
   }
 
   private def createInMemoryStore(appId: String, attempt: AttemptInfoWrapper): KVStore = {
-    val store = if (conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-      incrimentInMemoryStore.getOrDefault((appId, attempt.info.attemptId),
-        new InMemoryStore())
+    val store = if (isIncrementalParsingEnabled) {
+      storeMap.getOrDefault((appId, attempt.info.attemptId), new InMemoryStore())
     } else {
       new InMemoryStore
     }
@@ -1154,8 +1148,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       attempt.lastIndex)
     rebuildAppStore(appId, attempt.info.attemptId, store, reader,
      attempt.info.lastUpdated.getTime())
-    if (conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-      incrimentInMemoryStore.put((appId, attempt.info.attemptId), store)
+    if (isIncrementalParsingEnabled) {
+      storeMap.put((appId, attempt.info.attemptId), store)
     }
     store
   }
@@ -1231,9 +1225,12 @@ private[history] case class LogInfo(
     lastIndex: Option[Long],
     isComplete: Boolean)
 
-private[history] case class IncrimentInfo(@KVIndexParam logPath: String,
-                                      isCompleted: Boolean,
+private[history] case class IncrimentInfo(val appId: String,
+                                          val attemptId: Option[String],
+                                          fileIndex: Int,
                                       lineToSkip: Int) {
+  @JsonIgnore @KVIndexParam
+  def id: String = appId + "/" + attemptId
 }
 
 private[history] class AttemptInfoWrapper(

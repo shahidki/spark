@@ -133,9 +133,12 @@ private[thriftserver] class ExecutionInfo(
   }
 }
 
-//class MapStore(
-//              val appId: String,
-//              val attemptId: String,
-//              val sessionList: ConcurrentHashMap[String, LiveSessionData],
-//           val executionList: ConcurrentHashMap[String, LiveExecutionData]
-//              )
+class HiveThriftserver2ListenerData(
+              val appId: String,
+              val attemptId: String,
+              val sessionList: ConcurrentHashMap[String, LiveSessionData],
+              val executionList: ConcurrentHashMap[String, LiveExecutionData]
+              ) {
+  @JsonIgnore @KVIndex
+  def key: String = appId + "/" + attemptId
+}

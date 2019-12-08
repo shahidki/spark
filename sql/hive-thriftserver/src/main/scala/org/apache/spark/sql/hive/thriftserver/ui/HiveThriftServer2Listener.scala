@@ -46,13 +46,20 @@ private[thriftserver] class HiveThriftServer2Listener(
   private var attemptId: String = _
 
   def initialize(appId: String, attemptId: String): Unit = {
-//    if (!live && sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-//      this.appId = appId
-//      this.attemptId = attemptId
-//      val map = kvstore.read(classOf[MapStore], appId)
-//      map.executionList.entrySet().asScala.foreach(x => executionList.put(x.getKey, x.getValue))
-//      map.sessionList.entrySet().asScala.foreach(x => sessionList.put(x.getKey, x.getValue))
-//    }
+    if (!live && sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+      this.appId = appId
+      this.attemptId = attemptId
+      try {
+        val listenerData = kvstore.read(classOf[HiveThriftserver2ListenerData], appId)
+        listenerData.executionList.entrySet().asScala.foreach(x =>
+          executionList.put(x.getKey, x.getValue))
+        listenerData.sessionList.entrySet().asScala.foreach(x =>
+          sessionList.put(x.getKey, x.getValue))
+      } catch {
+        case e: Exception =>
+
+      }
+    }
   }
 
   private val (retainedStatements: Int, retainedSessions: Int) = {
@@ -82,8 +89,7 @@ private[thriftserver] class HiveThriftServer2Listener(
     if (!live) {
       flush((entity: LiveEntity) => updateStoreWithTriggerEnabled(entity))
       if (sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-        val entity = new mapData(appId, attemptId, sessionList, executionList)
-        entity.write(kvstore, System.currentTimeMillis())
+        kvstore.write(new HiveThriftserver2ListenerData(appId, attemptId, sessionList, executionList))
       }
     }
   }
@@ -330,18 +336,3 @@ private[thriftserver] class LiveSessionData(
       totalExecution)
   }
 }
-
-//  private[thriftserver] class mapData(
-//                                               val appId: String,
-//                                               val attemptId: String,
-//                                               val sessionList: ConcurrentHashMap[String, LiveSessionData],
-//                                               val executionList: ConcurrentHashMap[String, LiveExecutionData]) extends LiveEntity {
-//
-//    override protected def doUpdate(): Any = {
-//      new MapStore(
-//        appId,
-//        attemptId,
-//        sessionList,
-//        executionList)
-//    }
-//  }

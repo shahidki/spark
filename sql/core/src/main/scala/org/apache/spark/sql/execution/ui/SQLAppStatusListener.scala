@@ -77,9 +77,9 @@ class SQLAppStatusListener(
   }
 
   def initialize(appId: String, attemptId: Option[String]): Unit = {
-    this.appId = appId
-    this.attemptId = attemptId
     if (!live && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+      this.appId = appId
+      this.attemptId = attemptId
       try {
         val mapData = kvstore.read(classOf[SQLAppStatusListenerData], appId + "/" + attemptId)
         mapData.liveExecutions.entrySet().asScala.foreach(x =>

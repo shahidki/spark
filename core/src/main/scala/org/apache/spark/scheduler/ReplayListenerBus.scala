@@ -73,7 +73,7 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
       linesToSkip: Int): ReplayResult = {
     var currentLine: String = null
     var lineNumber: Int = 0
-    var lastLine = lineNumber
+    var lastLine = linesToSkip
     val unrecognizedEvents = new scala.collection.mutable.HashSet[String]
     val unrecognizedProperties = new scala.collection.mutable.HashSet[String]
 
@@ -123,19 +123,19 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
 
         }
       }
-      ReplayResult.apply(true, lastLine)
+      ReplayResult(success = true, lastLine)
     } catch {
       case e: HaltReplayException =>
         // Just stop replay.
-        ReplayResult.apply(false, lastLine)
+        ReplayResult(success = false, lastLine)
       case _: EOFException if maybeTruncated =>
-        ReplayResult.apply(false, lastLine)
+        ReplayResult(success = false, lastLine)
       case ioe: IOException =>
         throw ioe
       case e: Exception =>
         logError(s"Exception parsing Spark event log: $sourceName", e)
         logError(s"Malformed line #$lineNumber: $currentLine\n")
-        ReplayResult.apply(false, lastLine)
+        ReplayResult(success = false, lastLine)
     }
   }
 
