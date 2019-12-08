@@ -55,9 +55,10 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
       logData: InputStream,
       sourceName: String,
       maybeTruncated: Boolean = false,
-      eventsFilter: ReplayEventsFilter = SELECT_ALL_FILTER): Boolean = {
+      eventsFilter: ReplayEventsFilter = SELECT_ALL_FILTER,
+      linesToSkip: Int = -1): ReplayResult = {
     val lines = Source.fromInputStream(logData)(Codec.UTF8).getLines()
-    replay(lines, sourceName, maybeTruncated, eventsFilter)
+    replay(lines, sourceName, maybeTruncated, eventsFilter, linesToSkip)
   }
 
   /**
@@ -68,9 +69,11 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
       lines: Iterator[String],
       sourceName: String,
       maybeTruncated: Boolean,
-      eventsFilter: ReplayEventsFilter): Boolean = {
+      eventsFilter: ReplayEventsFilter,
+      linesToSkip: Int): ReplayResult = {
     var currentLine: String = null
     var lineNumber: Int = 0
+    var lastLine = lineNumber
     val unrecognizedEvents = new scala.collection.mutable.HashSet[String]
     val unrecognizedProperties = new scala.collection.mutable.HashSet[String]
 
@@ -78,15 +81,20 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
       val lineEntries = lines
         .zipWithIndex
         .filter { case (line, _) => eventsFilter(line) }
+        .filter(_._2 > linesToSkip)
 
       while (lineEntries.hasNext) {
         try {
           val entry = lineEntries.next()
 
+
+
           currentLine = entry._1
           lineNumber = entry._2 + 1
+          logError(s"current entry is ${currentLine} and line is ${lineNumber}\n")
 
           postToAll(JsonProtocol.sparkEventFromJson(parse(currentLine)))
+          lastLine = lineNumber - 1
         } catch {
           case e: ClassNotFoundException =>
             // Ignore unknown events, parse through the event log file.
@@ -114,20 +122,25 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
               logWarning(s"Got JsonParseException from log file $sourceName" +
                 s" at line $lineNumber, the file might not have finished writing cleanly.")
             }
+
         }
       }
-      true
+      ReplayResult.apply(true, lastLine)
     } catch {
       case e: HaltReplayException =>
         // Just stop replay.
-        false
-      case _: EOFException if maybeTruncated => false
+        lastLine -= 1
+        ReplayResult.apply(false, lastLine)
+      case _: EOFException if maybeTruncated =>
+        lastLine -= 1
+        ReplayResult.apply(false, lastLine)
       case ioe: IOException =>
         throw ioe
       case e: Exception =>
+        lastLine -= 1
         logError(s"Exception parsing Spark event log: $sourceName", e)
         logError(s"Malformed line #$lineNumber: $currentLine\n")
-        false
+        ReplayResult.apply(false, lastLine)
     }
   }
 
@@ -136,6 +149,8 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
   }
 
 }
+
+private[spark] case class ReplayResult(success: Boolean, linesRead: Int)
 
 /**
  * Exception that can be thrown by listeners to halt replay. This is handled by ReplayListenerBus

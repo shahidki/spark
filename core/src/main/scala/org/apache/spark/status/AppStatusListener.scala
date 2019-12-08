@@ -17,16 +17,15 @@
 
 package org.apache.spark.status
 
-import java.util.Date
+import java.util.{Date, NoSuchElementException}
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.HashMap
-
 import org.apache.spark._
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.CPUS_PER_TASK
+import org.apache.spark.internal.config.{CPUS_PER_TASK, History}
 import org.apache.spark.internal.config.Status._
 import org.apache.spark.scheduler._
 import org.apache.spark.status.api.v1
@@ -49,9 +48,11 @@ private[spark] class AppStatusListener(
     lastUpdateTime: Option[Long] = None) extends SparkListener with Logging {
 
   private var sparkVersion = SPARK_VERSION
-  private var appInfo: v1.ApplicationInfo = null
+  private var appInfo: v1.ApplicationInfo = _
   private var appSummary = new AppSummary(0, 0)
   private var coresPerTask: Int = 1
+  private var appId: String = _
+  private var attemptId: Option[String] = None
 
   // How often to update live entities. -1 means "never update" when replaying applications,
   // meaning only the last write will happen. For live applications, this avoids a few
@@ -100,8 +101,38 @@ private[spark] class AppStatusListener(
     if (!live) {
       val now = System.nanoTime()
       flush(update(_, now))
+      if (conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+        kvstore.write(new AppStatusListenerData(appId, attemptId, liveStages, liveJobs,
+          liveExecutors, deadExecutors, liveTasks, liveRDDs, pools, appInfo,
+          appSummary, coresPerTask, activeExecutorCount))
+      }
     }
   }
+
+  def initialize(appId: String, attemptId: Option[String]): Unit = {
+    if (!live && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+      try {
+        val mapData = kvstore.read(classOf[AppStatusListenerData], appId + "/" + attemptId)
+        mapData.liveStages.entrySet().asScala.foreach(x => liveStages.put(x.getKey, x.getValue))
+        mapData.liveJobs.map(x => liveJobs.put(x._1, x._2))
+        mapData.liveExecutors.map(x => liveExecutors.put(x._1, x._2))
+        mapData.deadExecutors.map(x => deadExecutors.put(x._1, x._2))
+        mapData.liveTasks.map(x => liveTasks.put(x._1, x._2))
+        mapData.liveRDDs.map(x => liveRDDs.put(x._1, x._2))
+        mapData.pools.map(x => pools.put(x._1, x._2))
+        this.appId = appId
+        this.attemptId = attemptId
+        appInfo = mapData.appInfo
+        appSummary = mapData.appSummary
+        coresPerTask = mapData.coresPerTask
+        activeExecutorCount = mapData.activeExecutorCount
+      } catch {
+        case e: NoSuchElementException =>
+
+      }
+
+      }
+    }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
     case SparkListenerLogStart(version) => sparkVersion = version

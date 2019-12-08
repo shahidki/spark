@@ -21,9 +21,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
-
 import org.apache.hive.service.server.HiveServer2
-
+import org.apache.spark.internal.config.History
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.config.Status.LIVE_ENTITY_UPDATE_PERIOD
 import org.apache.spark.scheduler._
@@ -42,6 +41,19 @@ private[thriftserver] class HiveThriftServer2Listener(
 
   private val sessionList = new ConcurrentHashMap[String, LiveSessionData]()
   private val executionList = new ConcurrentHashMap[String, LiveExecutionData]()
+
+  private var appId: String = _
+  private var attemptId: String = _
+
+  def initialize(appId: String, attemptId: String): Unit = {
+//    if (!live && sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+//      this.appId = appId
+//      this.attemptId = attemptId
+//      val map = kvstore.read(classOf[MapStore], appId)
+//      map.executionList.entrySet().asScala.foreach(x => executionList.put(x.getKey, x.getValue))
+//      map.sessionList.entrySet().asScala.foreach(x => sessionList.put(x.getKey, x.getValue))
+//    }
+  }
 
   private val (retainedStatements: Int, retainedSessions: Int) = {
     (sparkConf.get(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT),
@@ -69,6 +81,10 @@ private[thriftserver] class HiveThriftServer2Listener(
   kvstore.onFlush {
     if (!live) {
       flush((entity: LiveEntity) => updateStoreWithTriggerEnabled(entity))
+      if (sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+        val entity = new mapData(appId, attemptId, sessionList, executionList)
+        entity.write(kvstore, System.currentTimeMillis())
+      }
     }
   }
 
@@ -205,6 +221,7 @@ private[thriftserver] class HiveThriftServer2Listener(
   private def flush(entityFlushFunc: LiveEntity => Unit): Unit = {
     sessionList.values.asScala.foreach(entityFlushFunc)
     executionList.values.asScala.foreach(entityFlushFunc)
+
   }
 
   private def getOrCreateSession(
@@ -313,3 +330,18 @@ private[thriftserver] class LiveSessionData(
       totalExecution)
   }
 }
+
+//  private[thriftserver] class mapData(
+//                                               val appId: String,
+//                                               val attemptId: String,
+//                                               val sessionList: ConcurrentHashMap[String, LiveSessionData],
+//                                               val executionList: ConcurrentHashMap[String, LiveExecutionData]) extends LiveEntity {
+//
+//    override protected def doUpdate(): Any = {
+//      new MapStore(
+//        appId,
+//        attemptId,
+//        sessionList,
+//        executionList)
+//    }
+//  }

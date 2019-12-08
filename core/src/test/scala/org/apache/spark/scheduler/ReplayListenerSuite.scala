@@ -197,7 +197,7 @@ class ReplayListenerSuite extends SparkFunSuite with BeforeAndAfter with LocalSp
     fileSystem.mkdirs(logDirPath)
 
     val conf = getLoggingConf(logDirPath, codecName)
-    sc = new SparkContext("local-cluster[2,1,1024]", "Test replay", conf)
+    sc = new SparkContext("local[1]", "Test replay", conf)
 
     // Run a few jobs
     sc.parallelize(1 to 100, 1).count()

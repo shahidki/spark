@@ -17,10 +17,12 @@
 
 package org.apache.spark.sql.hive.thriftserver.ui
 
+import java.util.concurrent.ConcurrentHashMap
+
 import com.fasterxml.jackson.annotation.JsonIgnore
+
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
-
 import org.apache.spark.sql.hive.thriftserver.HiveThriftServer2.ExecutionState
 import org.apache.spark.status.KVUtils.KVIndexParam
 import org.apache.spark.util.kvstore.{KVIndex, KVStore}
@@ -130,3 +132,10 @@ private[thriftserver] class ExecutionInfo(
     }
   }
 }
+
+//class MapStore(
+//              val appId: String,
+//              val attemptId: String,
+//              val sessionList: ConcurrentHashMap[String, LiveSessionData],
+//           val executionList: ConcurrentHashMap[String, LiveExecutionData]
+//              )

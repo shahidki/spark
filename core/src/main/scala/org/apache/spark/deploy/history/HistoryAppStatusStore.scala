@@ -37,7 +37,7 @@ private[spark] class HistoryAppStatusStore(
       conf.get(CUSTOM_EXECUTOR_LOG_URL)
     } else {
       None
-    }
+   }
   }
 
   private val logUrlHandler = new ExecutorLogUrlHandler(logUrlPattern)

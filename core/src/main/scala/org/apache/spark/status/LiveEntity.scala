@@ -17,14 +17,14 @@
 
 package org.apache.spark.status
 
+import java.util
 import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.immutable.{HashSet, TreeSet}
 import scala.collection.mutable.HashMap
-
 import com.google.common.collect.Interners
-
 import org.apache.spark.JobExecutionStatus
 import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
 import org.apache.spark.resource.ResourceInformation
@@ -34,6 +34,8 @@ import org.apache.spark.storage.{RDDInfo, StorageLevel}
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.AccumulatorContext
 import org.apache.spark.util.collection.OpenHashSet
+
+import scala.collection.mutable
 
 /**
  * A mutable representation of a live entity in Spark (jobs, stages, tasks, et al). Every live
@@ -59,7 +61,7 @@ private[spark] abstract class LiveEntity {
 
 }
 
-private class LiveJob(
+private[status] class LiveJob(
     val jobId: Int,
     name: String,
     description: Option[String],
@@ -116,7 +118,7 @@ private class LiveJob(
 
 }
 
-private class LiveTask(
+private[status] class LiveTask(
     var info: TaskInfo,
     stageId: Int,
     stageAttemptId: Int,
@@ -244,7 +246,7 @@ private class LiveTask(
 
 }
 
-private class LiveExecutor(val executorId: String, _addTime: Long) extends LiveEntity {
+private[status] class LiveExecutor(val executorId: String, _addTime: Long) extends LiveEntity {
 
   var hostPort: String = null
   var host: String = null
@@ -331,7 +333,7 @@ private class LiveExecutor(val executorId: String, _addTime: Long) extends LiveE
   }
 }
 
-private class LiveExecutorStageSummary(
+private[status] class LiveExecutorStageSummary(
     stageId: Int,
     attemptId: Int,
     executorId: String) extends LiveEntity {
@@ -368,7 +370,7 @@ private class LiveExecutorStageSummary(
 
 }
 
-private class LiveStage extends LiveEntity {
+private[status] class LiveStage extends LiveEntity {
 
   import LiveEntityHelpers._
 
@@ -550,7 +552,7 @@ private class LiveRDDDistribution(exec: LiveExecutor) {
  * RDDs, this covers the case where an early stage is run on the unpersisted RDD, and a later stage
  * it started after the RDD is marked for caching.
  */
-private class LiveRDD(val info: RDDInfo, storageLevel: StorageLevel) extends LiveEntity {
+private[status] class LiveRDD(val info: RDDInfo, storageLevel: StorageLevel) extends LiveEntity {
 
   import LiveEntityHelpers._
 
@@ -615,7 +617,7 @@ private class LiveRDD(val info: RDDInfo, storageLevel: StorageLevel) extends Liv
 
 }
 
-private class SchedulerPool(name: String) extends LiveEntity {
+private[status] class SchedulerPool(name: String) extends LiveEntity {
 
   var stageIds = Set[Int]()
 

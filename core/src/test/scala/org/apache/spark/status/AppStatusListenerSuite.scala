@@ -22,10 +22,8 @@ import java.util.{Date, Properties}
 
 import scala.collection.JavaConverters._
 import scala.collection.immutable.Map
-import scala.reflect.{classTag, ClassTag}
-
+import scala.reflect.{ClassTag, classTag}
 import org.scalatest.BeforeAndAfter
-
 import org.apache.spark._
 import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
 import org.apache.spark.internal.config.Status._
@@ -35,6 +33,7 @@ import org.apache.spark.scheduler.cluster._
 import org.apache.spark.status.api.v1
 import org.apache.spark.storage._
 import org.apache.spark.util.Utils
+import org.apache.spark.util.kvstore.{InMemoryStore, KVStore}
 
 class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
 
@@ -102,7 +101,8 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
   }
 
   test("scheduler events") {
-    val listener = new AppStatusListener(store, conf, true)
+    val store = new ElementTrackingStore(new InMemoryStore, conf)
+    val listener = new AppStatusListener(store, conf, false)
 
     listener.onOtherEvent(SparkListenerLogStart("TestSparkVersion"))
 
@@ -116,7 +116,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
       Some("attempt"),
       None))
 
-    check[ApplicationInfoWrapper]("id") { app =>
+    check[ApplicationInfoWrapper](store, "id") { app =>
       assert(app.info.name === "name")
       assert(app.info.id === "id")
       assert(app.info.attempts.size === 1)
@@ -141,7 +141,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
     }
 
     execIds.foreach { id =>
-      check[ExecutorSummaryWrapper](id) { exec =>
+      check[ExecutorSummaryWrapper](store, id) { exec =>
         assert(exec.info.id === id)
         assert(exec.info.hostPort === s"$id.example.com")
         assert(exec.info.isActive)
@@ -161,7 +161,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
 
     listener.onJobStart(SparkListenerJobStart(1, time, stages, jobProps))
 
-    check[JobDataWrapper](1) { job =>
+    check[JobDataWrapper](store, 1) { job =>
       assert(job.info.jobId === 1)
       assert(job.info.name === stages.last.name)
       assert(job.info.description === Some("jobDescription"))
@@ -186,7 +186,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
       assert(job.info.numActiveStages === 1)
     }
 
-    check[StageDataWrapper](key(stages.head)) { stage =>
+    check[StageDataWrapper](store, key(stages.head)) { stage =>
       assert(stage.info.status === v1.StageStatus.ACTIVE)
       assert(stage.info.submissionTime === Some(new Date(stages.head.submissionTime.get)))
       assert(stage.info.numTasks === stages.head.numTasks)
@@ -202,13 +202,14 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
         task))
     }
 
+    store.close(false)
     assert(store.count(classOf[TaskDataWrapper]) === s1Tasks.size)
 
-    check[JobDataWrapper](1) { job =>
+    check[JobDataWrapper](store, 1) { job =>
       assert(job.info.numActiveTasks === s1Tasks.size)
     }
 
-    check[StageDataWrapper](key(stages.head)) { stage =>
+    check[StageDataWrapper](store, key(stages.head)) { stage =>
       assert(stage.info.numActiveTasks === s1Tasks.size)
       assert(stage.info.firstTaskLaunchedTime === Some(new Date(s1Tasks.head.launchTime)))
     }
@@ -227,6 +228,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
         assert(wrapper.taskLocality === task.taskLocality.toString())
         assert(wrapper.speculative === task.speculative)
       }
+
     }
 
     // Send two executor metrics update. Only update one metric to avoid a lot of boilerplate code.
@@ -241,7 +243,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
           Seq((task.taskId, stages.head.stageId, stages.head.attemptNumber, Seq(accum)))))
       }
 
-      check[StageDataWrapper](key(stages.head)) { stage =>
+      check[StageDataWrapper](store, key(stages.head)) { stage =>
         assert(stage.info.memoryBytesSpilled === s1Tasks.size * value)
       }
 
@@ -275,7 +277,7 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
       assert(exec.info.isBlacklistedForStage === expectedBlacklistedFlag)
     }
 
-    check[ExecutorSummaryWrapper](execIds.head) { exec =>
+    check[ExecutorSummaryWrapper](store, execIds.head) { exec =>
       assert(exec.info.blacklistedInStages === Set(stages.head.stageId))
     }
 
@@ -313,22 +315,22 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
 
     assert(store.count(classOf[TaskDataWrapper]) === s1Tasks.size + 1)
 
-    check[JobDataWrapper](1) { job =>
+    check[JobDataWrapper](store, 1) { job =>
       assert(job.info.numFailedTasks === 1)
       assert(job.info.numActiveTasks === s1Tasks.size)
     }
 
-    check[StageDataWrapper](key(stages.head)) { stage =>
+    check[StageDataWrapper](store, key(stages.head)) { stage =>
       assert(stage.info.numFailedTasks === 1)
       assert(stage.info.numActiveTasks === s1Tasks.size)
     }
 
-    check[TaskDataWrapper](s1Tasks.head.taskId) { task =>
+    check[TaskDataWrapper](store, s1Tasks.head.taskId) { task =>
       assert(task.status === s1Tasks.head.status)
       assert(task.errorMessage == Some(TaskResultLost.toErrorString))
     }
 
-    check[TaskDataWrapper](reattempt.taskId) { task =>
+    check[TaskDataWrapper](store, reattempt.taskId) { task =>
       assert(task.index === s1Tasks.head.index)
       assert(task.attempt === reattempt.attemptNumber)
     }
@@ -341,17 +343,17 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
     listener.onTaskEnd(SparkListenerTaskEnd(stages.head.stageId, stages.head.attemptNumber,
       "taskType", TaskKilled("killed"), killed, new ExecutorMetrics, null))
 
-    check[JobDataWrapper](1) { job =>
+    check[JobDataWrapper](store, 1) { job =>
       assert(job.info.numKilledTasks === 1)
       assert(job.info.killedTasksSummary === Map("killed" -> 1))
     }
 
-    check[StageDataWrapper](key(stages.head)) { stage =>
+    check[StageDataWrapper](store, key(stages.head)) { stage =>
       assert(stage.info.numKilledTasks === 1)
       assert(stage.info.killedTasksSummary === Map("killed" -> 1))
     }
 
-    check[TaskDataWrapper](killed.taskId) { task =>
+    check[TaskDataWrapper](store, killed.taskId) { task =>
       assert(task.index === killed.index)
       assert(task.errorMessage === Some("killed"))
     }
@@ -1665,6 +1667,10 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
     fn(value)
   }
 
+  private def check[T: ClassTag](store: KVStore, key: Any)(fn: T => Unit): Unit = {
+    val value = store.read(classTag[T].runtimeClass, key).asInstanceOf[T]
+    fn(value)
+  }
   private def newAttempt(orig: TaskInfo, nextId: Long): TaskInfo = {
     // Task reattempts have a different ID, but the same index as the original.
     new TaskInfo(nextId, orig.index, orig.attemptNumber + 1, time, orig.executorId,
