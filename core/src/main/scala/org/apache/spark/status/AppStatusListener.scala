@@ -51,7 +51,7 @@ private[spark] class AppStatusListener(
   private var appInfo: v1.ApplicationInfo = _
   private var appSummary = new AppSummary(0, 0)
   private var coresPerTask: Int = 1
-  private var appId: String = _
+  private var appId: String = ""
   private var attemptId: Option[String] = None
 
   // How often to update live entities. -1 means "never update" when replaying applications,
@@ -70,7 +70,7 @@ private[spark] class AppStatusListener(
 
   // Keep track of live entities, so that task metrics can be efficiently updated (without
   // causing too many writes to the underlying store, and other expensive operations).
-  private val liveStages = new ConcurrentHashMap[(Int, Int), LiveStage]()
+  private var liveStages = new ConcurrentHashMap[(Int, Int), LiveStage]()
   private val liveJobs = new HashMap[Int, LiveJob]()
   private val liveExecutors = new HashMap[String, LiveExecutor]()
   private val deadExecutors = new HashMap[String, LiveExecutor]()
@@ -102,30 +102,34 @@ private[spark] class AppStatusListener(
       val now = System.nanoTime()
       flush(update(_, now))
       if (conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-        kvstore.write(new AppStatusListenerData(appId, attemptId, liveStages, liveJobs,
+        val data = new AppStatusListenerData(appId, attemptId, liveStages, liveJobs,
           liveExecutors, deadExecutors, liveTasks, liveRDDs, pools, appInfo,
-          appSummary, coresPerTask, activeExecutorCount))
+          appSummary, coresPerTask, activeExecutorCount)
+        logError(s"data is ${data.toString}")
+        kvstore.write(data)
       }
     }
   }
 
   def initialize(appId: String, attemptId: Option[String]): Unit = {
     if (!live && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+      this.appId = appId
+      this.attemptId = attemptId
       try {
-        val mapData = kvstore.read(classOf[AppStatusListenerData], appId + "/" + attemptId)
-        mapData.liveStages.entrySet().asScala.foreach(x => liveStages.put(x.getKey, x.getValue))
-        mapData.liveJobs.map(x => liveJobs.put(x._1, x._2))
-        mapData.liveExecutors.map(x => liveExecutors.put(x._1, x._2))
-        mapData.deadExecutors.map(x => deadExecutors.put(x._1, x._2))
-        mapData.liveTasks.map(x => liveTasks.put(x._1, x._2))
-        mapData.liveRDDs.map(x => liveRDDs.put(x._1, x._2))
-        mapData.pools.map(x => pools.put(x._1, x._2))
-        this.appId = appId
-        this.attemptId = attemptId
-        appInfo = mapData.appInfo
-        appSummary = mapData.appSummary
-        coresPerTask = mapData.coresPerTask
-        activeExecutorCount = mapData.activeExecutorCount
+        val listenerData = kvstore.read(classOf[AppStatusListenerData], appId + "/" + attemptId)
+        listenerData.liveStages.entrySet().asScala.foreach(x =>
+          liveStages.put(x.getKey, x.getValue))
+        listenerData.liveJobs.map(x => liveJobs.put(x._1, x._2))
+        listenerData.liveExecutors.map(x => liveExecutors.put(x._1, x._2))
+        listenerData.deadExecutors.map(x => deadExecutors.put(x._1, x._2))
+        listenerData.liveTasks.map(x => liveTasks.put(x._1, x._2))
+        listenerData.liveRDDs.map(x => liveRDDs.put(x._1, x._2))
+        listenerData.pools.map(x => pools.put(x._1, x._2))
+        appInfo = listenerData.appInfo
+        appSummary = listenerData.appSummary
+        coresPerTask = listenerData.coresPerTask
+        activeExecutorCount = listenerData.activeExecutorCount
+        logError(s"appId is $appId and attempt is $attemptId")
       } catch {
         case e: NoSuchElementException =>
 
@@ -1126,6 +1130,8 @@ private[spark] class AppStatusListener(
   private def liveUpdate(entity: LiveEntity, now: Long): Unit = {
     if (live) {
       update(entity, now)
+    } else {
+      val x= "do nothing"
     }
   }
 

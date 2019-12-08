@@ -19,13 +19,12 @@ package org.apache.spark.sql.execution.ui
 
 import java.lang.{Long => JLong}
 import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
-
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
-
 import org.apache.spark.JobExecutionStatus
 import org.apache.spark.status.KVUtils.KVIndexParam
 import org.apache.spark.util.kvstore.{KVIndex, KVStore}
@@ -143,3 +142,10 @@ case class SQLPlanMetric(
     name: String,
     accumulatorId: Long,
     metricType: String)
+
+class SQLAppStatusListenerData(val appId: String, val attemptId: Option[String],
+                               val liveExecutions: ConcurrentHashMap[Long, LiveExecutionData],
+                               val stageMetrics: ConcurrentHashMap[Int, LiveStageMetrics]) {
+  @JsonIgnore @KVIndex
+  def key: String = appId + "/" + attemptId
+}

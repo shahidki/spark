@@ -412,21 +412,6 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val uiOption = synchronized {
       activeUIs.remove((appId, attemptId))
     }
-//    uiOption.foreach { loadedUI =>
-//      loadedUI.lock.writeLock().lock()
-//      try {
-//        // loadedUI.ui.store.close()
-//      } finally {
-//        loadedUI.lock.writeLock().unlock()
-//      }
-//
-////      diskManager.foreach { dm =>
-////        // If the UI is not valid, delete its files from disk, if any. This relies on the fact that
-////        // ApplicationCache will never call this method concurrently with getAppUI() for the same
-////        // appId / attemptId.
-////        dm.release(appId, attemptId, delete = !loadedUI.valid)
-////      }
-//    }
   }
 
   /**
@@ -959,6 +944,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val replayBus = new ReplayListenerBus()
     val listener = new AppStatusListener(trackingStore, replayConf, false,
       lastUpdateTime = Some(lastUpdated))
+    logError(s"appId $appId and attempt $attemptId")
     listener.initialize(appId, attemptId)
     replayBus.addListener(listener)
 
@@ -993,34 +979,41 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     // stop replaying next log files if ReplayListenerBus indicates some error or halt
     var continueReplay = true
     logFiles.foreach { file =>
-      val lineToSkip: Int = getIncrementalInfo(file.getPath.toString)
-      if (continueReplay) {
+      val incInfo = getIncrementalInfo(file.getPath.toString)
+      val skipReplay = incInfo._1
+      val lineToSkip = incInfo._2
+      if (!skipReplay && continueReplay) {
         Utils.tryWithResource(EventLogFileReader.openEventLog(file.getPath, fs)) { in =>
           val result = replayBus.replay(in, file.getPath.toString,
             maybeTruncated = maybeTruncated, eventsFilter = eventsFilter, lineToSkip)
           continueReplay = result.success
-          updateIncrementalInfo(file.getPath.toString, result.linesRead)
+          val skipFile = result.success && file.getPath != logFiles.last.getPath
+          updateIncrementalInfo(file.getPath.toString, result.linesRead, skipFile)
         }
       }
     }
 
-    def updateIncrementalInfo(path: String, lineToSkip: Int): Unit = {
+    def updateIncrementalInfo(path: String, lineToSkip: Int, completed: Boolean): Unit = {
       if (rebuild && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-        listing.write(IncrimentInfo(path, true, lineToSkip))
+        listing.write(IncrimentInfo(path, completed, lineToSkip))
       }
     }
 
-    def getIncrementalInfo(path: String): Int = {
+    def getIncrementalInfo(path: String): (Boolean, Int) = {
       try {
         if (rebuild && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
           val info = listing.read(classOf[IncrimentInfo], path)
-          info.lineToSkip
+          if (info.isCompleted) {
+            (true, info.lineToSkip)
+          } else {
+            (false, info.lineToSkip)
+          }
         } else {
-          -1
+          (false, -1)
         }
       } catch {
         case _: Exception =>
-          -1
+          (false, -1)
       }
     }
   }
@@ -1129,22 +1122,23 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     if (!conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
        getStore
     } else {
+
       try {
-        val store = incrimentInMemoryStore.get(appId, attempt)
+        val store: KVStore = incrimentInMemoryStore.get((appId, attempt.info.attemptId))
+        require(store != null)
         val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
           attempt.lastIndex)
         logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
-        Utils.tryWithResource(store) { store =>
-          rebuildAppStore(appId, attempt.info.attemptId, store, reader,
-            attempt.info.lastUpdated.getTime())
-        }
+        rebuildAppStore(appId, attempt.info.attemptId, store, reader,
+          attempt.info.lastUpdated.getTime)
         incrimentInMemoryStore.put((appId, attempt.info.attemptId), store)
         store
       } catch {
         case _: Exception =>
-          val store = getStore
-          incrimentInMemoryStore.put((appId, attempt.info.attemptId), store)
-          store
+         // store.close()
+          val store1 = getStore
+          incrimentInMemoryStore.put((appId, attempt.info.attemptId), store1)
+          store1
       }
     }
   }
@@ -1238,7 +1232,7 @@ private[history] case class LogInfo(
     isComplete: Boolean)
 
 private[history] case class IncrimentInfo(@KVIndexParam logPath: String,
-                                     isCompleted: Boolean,
+                                      isCompleted: Boolean,
                                       lineToSkip: Int) {
 }
 

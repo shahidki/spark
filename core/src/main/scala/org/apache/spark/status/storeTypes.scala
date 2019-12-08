@@ -460,9 +460,15 @@ private[spark] class AppStatusListenerData(val appId: String,
                                            val appSummary: AppSummary,
                                            val coresPerTask: Int,
                                            val activeExecutorCount: Int) {
-
   @JsonIgnore @KVIndex
   def key: String = appId + "/" + attemptId
+
+  override def toString: String = {
+    s"AppStatusListenerData $appId $attemptId ${liveStages.toString}, ${liveJobs.toString()}," +
+      s" ${liveExecutors.toString()}," +
+      s" $deadExecutors, $liveTasks, ${liveRDDs.toString()}, $pools, $appInfo," +
+      s" ${appSummary.toString}, $coresPerTask, $activeExecutorCount"
+  }
 
 }
 /**
@@ -473,6 +479,9 @@ private[spark] class AppSummary(
     val numCompletedJobs: Int,
     val numCompletedStages: Int) {
 
+  override def toString: String = {
+    s" app summary $numCompletedJobs and $numCompletedStages"
+  }
   @KVIndex
   def id: String = classOf[AppSummary].getName()
 

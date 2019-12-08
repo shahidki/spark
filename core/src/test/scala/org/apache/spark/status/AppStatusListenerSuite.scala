@@ -681,6 +681,47 @@ class AppStatusListenerSuite extends SparkFunSuite with BeforeAndAfter {
     }
   }
 
+  test("history test") {
+    val listener = new AppStatusListener(store, conf, false)
+    val maxMemory = 42L
+
+    // Register a couple of block managers.
+    val bm1 = BlockManagerId("1", "1.example.com", 42)
+    val bm2 = BlockManagerId("2", "2.example.com", 84)
+    Seq(bm1, bm2).foreach { bm =>
+      listener.onExecutorAdded(SparkListenerExecutorAdded(1L, bm.executorId,
+        new ExecutorInfo(bm.host, 1, Map.empty, Map.empty)))
+      listener.onBlockManagerAdded(SparkListenerBlockManagerAdded(1L, bm, maxMemory))
+    }
+
+    val rdd1b1 = RddBlock(1, 1, 1L, 2L)
+    val rdd1b2 = RddBlock(1, 2, 3L, 4L)
+    val rdd2b1 = RddBlock(2, 1, 5L, 6L)
+    val level = StorageLevel.MEMORY_AND_DISK
+
+    // Submit a stage for the first RDD before it's marked for caching, to make sure later
+    // the listener picks up the correct storage level.
+    val rdd1Info = new RDDInfo(rdd1b1.rddId, "rdd1", 2, StorageLevel.NONE, false, Nil)
+    val stage0 = new StageInfo(0, 0, "stage0", 4, Seq(rdd1Info), Nil, "details0")
+    listener.onStageSubmitted(SparkListenerStageSubmitted(stage0, new Properties()))
+    listener.onStageCompleted(SparkListenerStageCompleted(stage0))
+
+
+    // Submit a stage and make sure the RDDs are recorded.
+    rdd1Info.storageLevel = level
+    val rdd2Info = new RDDInfo(rdd2b1.rddId, "rdd2", 1, level, false, Nil)
+    val stage = new StageInfo(1, 0, "stage1", 4, Seq(rdd1Info, rdd2Info), Nil, "details1")
+    listener.onStageSubmitted(SparkListenerStageSubmitted(stage, new Properties()))
+
+    store.close(false)
+    check[RDDStorageInfoWrapper](rdd1b1.rddId) { wrapper =>
+      assert(wrapper.info.name === rdd1Info.name)
+      assert(wrapper.info.numPartitions === rdd1Info.numPartitions)
+      assert(wrapper.info.storageLevel === rdd1Info.storageLevel.description)
+    }
+
+  }
+
   test("storage events") {
     val listener = new AppStatusListener(store, conf, true)
     val maxMemory = 42L
