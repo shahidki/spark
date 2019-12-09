@@ -47,8 +47,8 @@ class SQLAppStatusListener(
   // Live tracked data is needed by the SQL status store to calculate metrics for in-flight
   // executions; that means arbitrary threads may be querying these maps, so they need to be
   // thread-safe.
-  private[spark] val liveExecutions = new ConcurrentHashMap[Long, LiveExecutionData]()
-  private[spark] val stageMetrics = new ConcurrentHashMap[Int, LiveStageMetrics]()
+  private[ui] val liveExecutions = new ConcurrentHashMap[Long, LiveExecutionData]()
+  private[ui] val stageMetrics = new ConcurrentHashMap[Int, LiveStageMetrics]()
 
   // Returns true if this listener has no live data. Exposed for tests only.
   private[sql] def noLiveData(): Boolean = {

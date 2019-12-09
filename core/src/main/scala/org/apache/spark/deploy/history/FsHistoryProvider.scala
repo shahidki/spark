@@ -1136,7 +1136,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         Some(listing.read(classOf[IncrimentInfo], Array(Some(appId), attempt.info.attemptId)))
       } else None
     } catch {
-      case _: Exception =>
+      case _: NoSuchElementException =>
         val info = IncrimentInfo(appId, attempt.info.attemptId, fileIndex = 0, lineToSkip = -1)
         listing.write(info)
         Some(info)

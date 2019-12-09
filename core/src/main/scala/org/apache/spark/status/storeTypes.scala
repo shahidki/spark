@@ -27,7 +27,6 @@ import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 
 import org.apache.spark.status.KVUtils._
-import org.apache.spark.status.api.v1
 import org.apache.spark.status.api.v1._
 import org.apache.spark.ui.scope._
 import org.apache.spark.util.kvstore.KVIndex
@@ -457,7 +456,7 @@ private[spark] class AppStatusListenerData(
     val liveTasks: mutable.HashMap[Long, LiveTask],
     val liveRDDs: mutable.HashMap[Int, LiveRDD],
     val pools: mutable.HashMap[String, SchedulerPool],
-    val appInfo: v1.ApplicationInfo,
+    val appInfo: ApplicationInfo,
     val coresPerTask: Int,
     val activeExecutorCount: Int) {
 
