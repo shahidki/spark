@@ -1011,7 +1011,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       logFiles: Seq[FileStatus],
       replayBus: ReplayListenerBus,
       maybeTruncated: Boolean,
-      info: Option[IncrimentMetaInfo] = None,
+      info: Option[IncrimentalMetaInfo] = None,
       eventsFilter: ReplayEventsFilter = SELECT_ALL_FILTER): Unit = {
     // stop replaying next log files if ReplayListenerBus indicates some error or halt
     var continueReplay = true

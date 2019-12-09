@@ -501,7 +501,6 @@ private[spark] class AppStatusListener(
       update(job, now, last = true)
       if (job.status == JobExecutionStatus.SUCCEEDED) {
         appSummary = new AppSummary(appSummary.numCompletedJobs + 1, appSummary.numCompletedStages)
-        logError(s"jOB END event appsummary ${appSummary.numCompletedJobs} and ${appSummary.numCompletedStages}")
         kvstore.write(appSummary)
       }
     }
@@ -790,8 +789,6 @@ private[spark] class AppStatusListener(
       }
       if (stage.status == v1.StageStatus.COMPLETE) {
         appSummary = new AppSummary(appSummary.numCompletedJobs, appSummary.numCompletedStages + 1)
-        logError(s"stage end event appsummary" +
-          s" ${appSummary.numCompletedJobs} and ${appSummary.numCompletedStages}")
         kvstore.write(appSummary)
       }
     }
