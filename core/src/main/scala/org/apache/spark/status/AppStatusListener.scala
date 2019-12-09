@@ -103,9 +103,10 @@ private[spark] class AppStatusListener(
       val now = System.nanoTime()
       flush(update(_, now))
       if (appId != null) {
+        // If incremental parsing is enabled, write the listener data to the store
         val data = new AppStatusListenerData(appId, attemptId, liveStages, liveJobs,
           liveExecutors, deadExecutors, liveTasks, liveRDDs,
-          pools, appInfo, coresPerTask, activeExecutorCount)
+          pools, appInfo, coresPerTask, appSummary, activeExecutorCount)
         kvstore.write(data)
       }
     }
@@ -113,6 +114,8 @@ private[spark] class AppStatusListener(
 
   def initialize(appId: String, attemptId: Option[String]): Unit = {
     if (!live) {
+      // If incremental parsing is enabled, read and update the listener data
+      // from store
       this.appId = appId
       this.attemptId = attemptId
       try {
@@ -128,7 +131,7 @@ private[spark] class AppStatusListener(
         listenerData.liveRDDs.map{entry => liveRDDs.put(entry._1, entry._2)}
         listenerData.pools.map{entry => pools.put(entry._1, entry._2)}
         appInfo = listenerData.appInfo
-        appSummary = kvstore.read(classOf[AppSummary], classOf[AppSummary].getName())
+        appSummary = listenerData.appSummary
         coresPerTask = listenerData.coresPerTask
         activeExecutorCount = listenerData.activeExecutorCount
       } catch {
@@ -498,6 +501,7 @@ private[spark] class AppStatusListener(
       update(job, now, last = true)
       if (job.status == JobExecutionStatus.SUCCEEDED) {
         appSummary = new AppSummary(appSummary.numCompletedJobs + 1, appSummary.numCompletedStages)
+        logError(s"jOB END event appsummary ${appSummary.numCompletedJobs} and ${appSummary.numCompletedStages}")
         kvstore.write(appSummary)
       }
     }
@@ -786,6 +790,8 @@ private[spark] class AppStatusListener(
       }
       if (stage.status == v1.StageStatus.COMPLETE) {
         appSummary = new AppSummary(appSummary.numCompletedJobs, appSummary.numCompletedStages + 1)
+        logError(s"stage end event appsummary" +
+          s" ${appSummary.numCompletedJobs} and ${appSummary.numCompletedStages}")
         kvstore.write(appSummary)
       }
     }

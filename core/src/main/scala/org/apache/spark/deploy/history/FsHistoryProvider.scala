@@ -127,10 +127,15 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
   private val pendingReplayTasksCount = new java.util.concurrent.atomic.AtomicInteger(0)
 
-  private val storeMap = new ConcurrentHashMap[(String, Option[String]), KVStore]()
   private val storePath = conf.get(LOCAL_STORE_DIR).map(new File(_))
   private val fastInProgressParsing = conf.get(FAST_IN_PROGRESS_PARSING)
-  private val isIncrementalParsingEnabled = storePath.isEmpty && conf.get(History.INCREMENTAL_PARSING_ENABLED)
+  // If incremental parsing support configuration is enabled, underlying store will not close
+  // during invalidate UI or detached UI. Metadata of the event read will store in the
+  // `IncrmentalInfo`. Whenever a new event come, parsing will happen from the line it
+  // read last time. Currently it supports inmemory store. TODO: Support for disk store.
+  private val isIncrementalParsingEnabled = storePath.isEmpty &&
+    conf.get(History.INCREMENTAL_PARSING_ENABLED)
+  private val storeMap = new ConcurrentHashMap[(String, Option[String]), KVStore]()
 
   // Visible for testing.
   private[history] val listing: KVStore = storePath.map { path =>
@@ -413,6 +418,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val uiOption = synchronized {
       activeUIs.remove((appId, attemptId))
     }
+    // If incremental parsing is enabled, will not close the underlying store.
     if (!isIncrementalParsingEnabled) {
       uiOption.foreach { loadedUI =>
         loadedUI.lock.writeLock().lock()
@@ -423,9 +429,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         }
 
         diskManager.foreach { dm =>
-          // If the UI is not valid, delete its files from disk, if any. This relies on the fact that
-          // ApplicationCache will never call this method concurrently with getAppUI() for the same
-          // appId / attemptId.
+          // If the UI is not valid, delete its files from disk, if any. This relies on the fact
+          // that ApplicationCache will never call this method concurrently with getAppUI() for
+          // the same appId / attemptId.
           dm.release(appId, attemptId, delete = !loadedUI.valid)
         }
       }
@@ -619,12 +625,19 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           }
 
           maybeUI.foreach { ui =>
+            if (isIncrementalParsingEnabled) {
+              storeMap.remove(appId -> attemptId)
+            }
             ui.invalidate()
             ui.ui.store.close()
           }
 
          if (isIncrementalParsingEnabled) {
-           listing.delete(classOf[IncrimentInfo], Array(Some(appId), attemptId))
+           try {
+             listing.delete(classOf[IncrimentalMetaInfo], Array(Some(appId), attemptId))
+           } catch {
+             case _: NoSuchElementException =>
+           }
          }
           diskManager.foreach(_.release(appId, attemptId, delete = true))
           true
@@ -742,7 +755,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           source.next()
         }
 
-        bus.replay(source, lastFile.getPath.toString, !appCompleted, eventsFilter, -1)
+        bus.replay(source, lastFile.getPath.toString, !appCompleted, eventsFilter, linesToSkip = -1)
       }
     }
 
@@ -800,6 +813,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     synchronized {
       activeUIs.get((appId, attemptId)).foreach { ui =>
         ui.invalidate()
+        // If incremental parsing is enabled, will not close the underlying store
+        // on invalidate UI.
         if (!isIncrementalParsingEnabled) {
           ui.ui.store.close()
         }
@@ -958,7 +973,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       store: KVStore,
       reader: EventLogFileReader,
       lastUpdated: Long,
-      incrimentInfo: Option[IncrimentInfo] = None): Unit = {
+      incrimentInfo: Option[IncrimentalMetaInfo] = None): Unit = {
     // Disable async updates, since they cause higher memory usage, and it's ok to take longer
     // to parse the event logs in the SHS.
     val replayConf = conf.clone().set(ASYNC_TRACKING_ENABLED, false)
@@ -996,7 +1011,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       logFiles: Seq[FileStatus],
       replayBus: ReplayListenerBus,
       maybeTruncated: Boolean,
-      info: Option[IncrimentInfo] = None,
+      info: Option[IncrimentMetaInfo] = None,
       eventsFilter: ReplayEventsFilter = SELECT_ALL_FILTER): Unit = {
     // stop replaying next log files if ReplayListenerBus indicates some error or halt
     var continueReplay = true
@@ -1011,8 +1026,8 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           continueReplay = result.success
           lineToSkip = -1
           if (info.isDefined && (!continueReplay || fileIndex >= logFiles.size -1)) {
-            info.get.copy(fileIndex = fileIndex, lineToSkip = result.linesRead)
-            listing.write(info.get)
+            val updatedInfo = info.get.copy(fileIndex = fileIndex, lineToSkip = result.linesRead)
+            listing.write(updatedInfo)
           }
         }
         if (info.isDefined) {
@@ -1131,13 +1146,15 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     }
     val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
       attempt.lastIndex)
-    val info: Option[IncrimentInfo] = try {
+    // Incremental info is valid only if incremental parsing feature is enabled.
+    val info: Option[IncrimentalMetaInfo] = try {
       if (isIncrementalParsingEnabled) {
-        Some(listing.read(classOf[IncrimentInfo], Array(Some(appId), attempt.info.attemptId)))
+        Some(listing.read(classOf[IncrimentalMetaInfo], Array(Some(appId), attempt.info.attemptId)))
       } else None
     } catch {
       case _: NoSuchElementException =>
-        val info = IncrimentInfo(appId, attempt.info.attemptId, fileIndex = 0, lineToSkip = -1)
+        val info = IncrimentalMetaInfo(appId, attempt.info.attemptId,
+          fileIndex = 0, lineToSkip = -1)
         listing.write(info)
         Some(info)
     }
@@ -1219,7 +1236,7 @@ private[history] case class LogInfo(
     lastIndex: Option[Long],
     isComplete: Boolean)
 
-private[history] case class IncrimentInfo(
+private[history] case class IncrimentalMetaInfo(
     appId: String,
     attemptId: Option[String],
     fileIndex: Int,

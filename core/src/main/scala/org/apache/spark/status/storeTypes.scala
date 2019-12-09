@@ -458,6 +458,7 @@ private[spark] class AppStatusListenerData(
     val pools: mutable.HashMap[String, SchedulerPool],
     val appInfo: ApplicationInfo,
     val coresPerTask: Int,
+    val appSummary: AppSummary,
     val activeExecutorCount: Int) {
 
   @KVIndex @JsonIgnore
