@@ -135,7 +135,7 @@ private[thriftserver] class ExecutionInfo(
 
 class HiveThriftserver2ListenerData(
               val appId: String,
-              val attemptId: String,
+              val attemptId: Option[String],
               val sessionList: ConcurrentHashMap[String, LiveSessionData],
               val executionList: ConcurrentHashMap[String, LiveExecutionData]
               ) {

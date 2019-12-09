@@ -103,9 +103,10 @@ private[spark] class AppStatusListener(
       flush(update(_, now))
       if (conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
         val data = new AppStatusListenerData(appId, attemptId, liveStages, liveJobs,
-          liveExecutors, deadExecutors, liveTasks, liveRDDs, pools, appInfo,
-          appSummary, coresPerTask, activeExecutorCount)
+          liveExecutors, deadExecutors, liveTasks, liveRDDs,
+          pools, appInfo, coresPerTask, activeExecutorCount)
         logError(s"data is ${data.toString}")
+
         kvstore.write(data)
       }
     }
@@ -126,13 +127,13 @@ private[spark] class AppStatusListener(
         listenerData.liveRDDs.map(x => liveRDDs.put(x._1, x._2))
         listenerData.pools.map(x => pools.put(x._1, x._2))
         appInfo = listenerData.appInfo
-        appSummary = listenerData.appSummary
+        appSummary = kvstore.read(classOf[AppSummary], classOf[AppSummary].getName())
         coresPerTask = listenerData.coresPerTask
         activeExecutorCount = listenerData.activeExecutorCount
         logError(s"appId is $appId and attempt is $attemptId")
       } catch {
-        case e: NoSuchElementException =>
-
+        case e: Exception =>
+          logError("Fail to read")
       }
 
       }

@@ -195,19 +195,38 @@ class FsHistoryProviderSuite extends SparkFunSuite with Matchers with Logging {
 
     val logFile1 = newLogFile("app1", None, inProgress = true)
     writeFile(logFile1, None,
+      SparkListenerApplicationStart("app1", Some("app1"), 1L, "test", None)
+    )
+    updateAndCheck(provider) { list =>
+      list.size should be (1)
+      provider.getAttempt("app1", None).logPath should endWith(EventLogFileWriter.IN_PROGRESS)
+      val appUi = provider.getAppUI("app1", None)
+      appUi should not be null
+      appUi should not be None
+    }
+
+    writeFile(logFile1, None,
       SparkListenerApplicationStart("app1", Some("app1"), 1L, "test", None),
+      SparkListenerJobStart(0, 0L, Seq(), null),
       SparkListenerApplicationEnd(2L)
     )
     updateAndCheck(provider) { list =>
       list.size should be (1)
       provider.getAttempt("app1", None).logPath should endWith(EventLogFileWriter.IN_PROGRESS)
+      val appUi = provider.getAppUI("app1", None)
+      appUi should not be null
+      appUi should not be None
     }
 
     logFile1.renameTo(newLogFile("app1", None, inProgress = false))
     updateAndCheck(provider) { list =>
       list.size should be (1)
       provider.getAttempt("app1", None).logPath should not endWith(EventLogFileWriter.IN_PROGRESS)
+      val appUi = provider.getAppUI("app1", None)
+      appUi should not be null
+      appUi should not be None
     }
+
   }
 
   test("Parse logs that application is not started") {

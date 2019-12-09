@@ -43,9 +43,9 @@ private[thriftserver] class HiveThriftServer2Listener(
   private val executionList = new ConcurrentHashMap[String, LiveExecutionData]()
 
   private var appId: String = _
-  private var attemptId: String = _
+  private var attemptId: Option[String] = _
 
-  def initialize(appId: String, attemptId: String): Unit = {
+  def initialize(appId: String, attemptId: Option[String]): Unit = {
     if (!live && sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
       this.appId = appId
       this.attemptId = attemptId

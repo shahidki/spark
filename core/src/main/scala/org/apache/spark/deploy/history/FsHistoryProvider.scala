@@ -29,6 +29,7 @@ import scala.collection.mutable
 import scala.concurrent.ExecutionException
 import scala.io.Source
 import scala.xml.Node
+
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import com.google.common.util.concurrent.MoreExecutors
@@ -37,6 +38,7 @@ import org.apache.hadoop.hdfs.DistributedFileSystem
 import org.apache.hadoop.hdfs.protocol.HdfsConstants
 import org.apache.hadoop.security.AccessControlException
 import org.fusesource.leveldbjni.internal.NativeDB
+
 import org.apache.spark.{SecurityManager, SparkConf, SparkException}
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.internal.Logging
@@ -128,7 +130,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   private val storeMap = new ConcurrentHashMap[(String, Option[String]), KVStore]()
   private val storePath = conf.get(LOCAL_STORE_DIR).map(new File(_))
   private val fastInProgressParsing = conf.get(FAST_IN_PROGRESS_PARSING)
-  private val isIncrementalParsingEnabled = conf.get(History.INCREMENTAL_PARSING_ENABLED)
+  private val isIncrementalParsingEnabled = storePath.isEmpty && conf.get(History.INCREMENTAL_PARSING_ENABLED)
 
   // Visible for testing.
   private[history] val listing: KVStore = storePath.map { path =>
@@ -411,6 +413,23 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val uiOption = synchronized {
       activeUIs.remove((appId, attemptId))
     }
+    if (!isIncrementalParsingEnabled) {
+      uiOption.foreach { loadedUI =>
+        loadedUI.lock.writeLock().lock()
+        try {
+          loadedUI.ui.store.close()
+        } finally {
+          loadedUI.lock.writeLock().unlock()
+        }
+
+        diskManager.foreach { dm =>
+          // If the UI is not valid, delete its files from disk, if any. This relies on the fact that
+          // ApplicationCache will never call this method concurrently with getAppUI() for the same
+          // appId / attemptId.
+          dm.release(appId, attemptId, delete = !loadedUI.valid)
+        }
+      }
+    }
   }
 
   /**
@@ -598,12 +617,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           val maybeUI = synchronized {
             activeUIs.remove(appId -> attemptId)
           }
-
+          listing.delete(classOf[IncrimentInfo], appId + "/" + attemptId)
           maybeUI.foreach { ui =>
             ui.invalidate()
             ui.ui.store.close()
           }
-
           diskManager.foreach(_.release(appId, attemptId, delete = true))
           true
         }
@@ -778,7 +796,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     synchronized {
       activeUIs.get((appId, attemptId)).foreach { ui =>
         ui.invalidate()
-        // ui.ui.store.close()
+        if (!isIncrementalParsingEnabled) {
+          ui.ui.store.close()
+        }
       }
     }
   }
@@ -930,10 +950,11 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   /**
    * Rebuilds the application state store from its event log.
    */
-  private def rebuildAppStore(appId: String, attemptId: Option[String],
+  private def rebuildAppStore(
       store: KVStore,
       reader: EventLogFileReader,
-      lastUpdated: Long): Unit = {
+      lastUpdated: Long,
+      info: Option[IncrimentInfo] = None): Unit = {
     // Disable async updates, since they cause higher memory usage, and it's ok to take longer
     // to parse the event logs in the SHS.
     val replayConf = conf.clone().set(ASYNC_TRACKING_ENABLED, false)
@@ -941,27 +962,19 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val replayBus = new ReplayListenerBus()
     val listener = new AppStatusListener(trackingStore, replayConf, false,
       lastUpdateTime = Some(lastUpdated))
-    logError(s"appId $appId and attempt $attemptId")
-    listener.initialize(appId, attemptId)
+    if (info.isDefined) {
+      listener.initialize(info.get.appId, info.get.attemptId)
+    }
     replayBus.addListener(listener)
 
     for {
       plugin <- loadPlugins()
       listener <- plugin.createListeners(conf, trackingStore)
     } {
-      plugin.initialize(listener, appId, attemptId)
+      if (info.isDefined) {
+        plugin.initialize(listener, info.get.appId, info.get.attemptId)
+      }
       replayBus.addListener(listener)
-    }
-
-    val info: Option[IncrimentInfo] = try {
-      if (isIncrementalParsingEnabled) {
-        Some(listing.read(classOf[IncrimentInfo], appId + "/" + attemptId))
-      } else None
-    } catch {
-      case _: Exception =>
-        val info = IncrimentInfo(appId, attemptId, 0, -1)
-        listing.write(info)
-        Some(info)
     }
 
     try {
@@ -989,25 +1002,24 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     var lineToSkip = if (info.isDefined) {
       info.get.lineToSkip
     } else -1
-    var fileIndex = if (info.isDefined) {
+    val fileIndex = if (info.isDefined) {
       info.get.fileIndex
     } else 0
     var index = 0
     logFiles.foreach { file =>
-      if (continueReplay && fileIndex >= index) {
+      if (continueReplay && index >= fileIndex) {
         Utils.tryWithResource(EventLogFileReader.openEventLog(file.getPath, fs)) { in =>
           val result = replayBus.replay(in, file.getPath.toString,
             maybeTruncated = maybeTruncated, eventsFilter = eventsFilter, lineToSkip)
           continueReplay = result.success
           if (info.isDefined) {
-            lineToSkip += result.linesRead
-        }
-          if (continueReplay) {
-            index += 1
+            lineToSkip = result.linesRead
           }
         }
       }
-
+      if (continueReplay) {
+        index += 1
+      }
     }
       if (info.isDefined && isIncrementalParsingEnabled) {
         info.get.copy(fileIndex = index, lineToSkip = lineToSkip)
@@ -1077,65 +1089,43 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   private def loadDiskStore(
-      dm: HistoryServerDiskManager,
-      appId: String,
-      attempt: AttemptInfoWrapper): KVStore = {
+                             dm: HistoryServerDiskManager,
+                             appId: String,
+                             attempt: AttemptInfoWrapper): KVStore = {
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
 
-    def getStore: LevelDB = {
-      dm.openStore(appId, attempt.info.attemptId).foreach { path =>
-        try {
-          return KVUtils.open(path, metadata)
-        } catch {
-          case e: Exception =>
-            logInfo(s"Failed to open existing store for $appId/${attempt.info.attemptId}.", e)
-            dm.release(appId, attempt.info.attemptId, delete = true)
-        }
-      }
-      // At this point the disk data either does not exist or was deleted because it failed to
-      // load, so the event log needs to be replayed.
-
-      val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
-        attempt.lastIndex)
-      val isCompressed = reader.compressionCodec.isDefined
-      logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
-      val lease = dm.lease(reader.totalSize, isCompressed)
-      val newStorePath = try {
-        Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
-          rebuildAppStore("", None,
-            store, reader, attempt.info.lastUpdated.getTime())
-        }
-        lease.commit(appId, attempt.info.attemptId)
-      } catch {
-        case e: Exception =>
-          lease.rollback()
-          throw e
-      }
-
-      KVUtils.open(newStorePath, metadata)
-    }
     // First check if the store already exists and try to open it. If that fails, then get rid of
     // the existing data.
-    if (!isIncrementalParsingEnabled) {
-      getStore
-    } else {
+    dm.openStore(appId, attempt.info.attemptId).foreach { path =>
       try {
-        val store: KVStore = storeMap.get((appId, attempt.info.attemptId))
-        require(store != null)
-        val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
-          attempt.lastIndex)
-        logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
-        rebuildAppStore(appId, attempt.info.attemptId, store, reader,
-          attempt.info.lastUpdated.getTime)
-        storeMap.put((appId, attempt.info.attemptId), store)
-        store
+        return KVUtils.open(path, metadata)
       } catch {
-        case _: Exception =>
-          val store = getStore
-          storeMap.put((appId, attempt.info.attemptId), store)
-          store
+        case e: Exception =>
+          logInfo(s"Failed to open existing store for $appId/${attempt.info.attemptId}.", e)
+          dm.release(appId, attempt.info.attemptId, delete = true)
       }
     }
+
+    // At this point the disk data either does not exist or was deleted because it failed to
+    // load, so the event log needs to be replayed.
+
+    val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
+      attempt.lastIndex)
+    val isCompressed = reader.compressionCodec.isDefined
+    logInfo(s"Leasing disk manager space for app $appId / ${attempt.info.attemptId}...")
+    val lease = dm.lease(reader.totalSize, isCompressed)
+    val newStorePath = try {
+      Utils.tryWithResource(KVUtils.open(lease.tmpPath, metadata)) { store =>
+        rebuildAppStore(store, reader, attempt.info.lastUpdated.getTime())
+      }
+      lease.commit(appId, attempt.info.attemptId)
+    } catch {
+      case e: Exception =>
+        lease.rollback()
+        throw e
+    }
+
+    KVUtils.open(newStorePath, metadata)
   }
 
   private def createInMemoryStore(appId: String, attempt: AttemptInfoWrapper): KVStore = {
@@ -1146,8 +1136,18 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     }
     val reader = EventLogFileReader(fs, new Path(logDir, attempt.logPath),
       attempt.lastIndex)
-    rebuildAppStore(appId, attempt.info.attemptId, store, reader,
-     attempt.info.lastUpdated.getTime())
+    val info: Option[IncrimentInfo] = try {
+      if (isIncrementalParsingEnabled) {
+        Some(listing.read(classOf[IncrimentInfo], appId + "/" + attempt.info.attemptId))
+      } else None
+    } catch {
+      case _: Exception =>
+        val info = IncrimentInfo(appId, attempt.info.attemptId, fileIndex = 0, lineToSkip = -1)
+        listing.write(info)
+        Some(info)
+    }
+    rebuildAppStore(store, reader,
+     attempt.info.lastUpdated.getTime(), info)
     if (isIncrementalParsingEnabled) {
       storeMap.put((appId, attempt.info.attemptId), store)
     }
@@ -1225,10 +1225,11 @@ private[history] case class LogInfo(
     lastIndex: Option[Long],
     isComplete: Boolean)
 
-private[history] case class IncrimentInfo(val appId: String,
-                                          val attemptId: Option[String],
-                                          fileIndex: Int,
-                                      lineToSkip: Int) {
+private[history] case class IncrimentInfo(
+    val appId: String,
+    val attemptId: Option[String],
+    fileIndex: Int,
+    lineToSkip: Int) {
   @JsonIgnore @KVIndexParam
   def id: String = appId + "/" + attemptId
 }

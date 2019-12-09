@@ -457,17 +457,17 @@ private[spark] class AppStatusListenerData(val appId: String,
                                            val liveRDDs: mutable.HashMap[Int, LiveRDD],
                                            val pools: mutable.HashMap[String, SchedulerPool],
                                            val appInfo: v1.ApplicationInfo,
-                                           val appSummary: AppSummary,
                                            val coresPerTask: Int,
                                            val activeExecutorCount: Int) {
+
   @JsonIgnore @KVIndex
   def key: String = appId + "/" + attemptId
 
   override def toString: String = {
     s"AppStatusListenerData $appId $attemptId ${liveStages.toString}, ${liveJobs.toString()}," +
       s" ${liveExecutors.toString()}," +
-      s" $deadExecutors, $liveTasks, ${liveRDDs.toString()}, $pools, $appInfo," +
-      s" ${appSummary.toString}, $coresPerTask, $activeExecutorCount"
+      s" $deadExecutors, $liveTasks, ${liveRDDs.toString()}, $pools, $appInfo" +
+      s", $coresPerTask, $activeExecutorCount"
   }
 
 }
