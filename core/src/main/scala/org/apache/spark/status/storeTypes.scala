@@ -447,29 +447,22 @@ private[spark] class PoolData(
     @KVIndexParam val name: String,
     val stageIds: Set[Int])
 
-private[spark] class AppStatusListenerData(val appId: String,
-                                           val attemptId: Option[String],
-                                           val liveStages: ConcurrentHashMap[(Int, Int), LiveStage],
-                                           val liveJobs: mutable.HashMap[Int, LiveJob],
-                                           val liveExecutors: mutable.HashMap[String, LiveExecutor],
-                                           val deadExecutors: mutable.HashMap[String, LiveExecutor],
-                                           val liveTasks: mutable.HashMap[Long, LiveTask],
-                                           val liveRDDs: mutable.HashMap[Int, LiveRDD],
-                                           val pools: mutable.HashMap[String, SchedulerPool],
-                                           val appInfo: v1.ApplicationInfo,
-                                           val coresPerTask: Int,
-                                           val activeExecutorCount: Int) {
+private[spark] class AppStatusListenerData(
+    val appId: String,
+    val attemptId: Option[String],
+    val liveStages: ConcurrentHashMap[(Int, Int), LiveStage],
+    val liveJobs: mutable.HashMap[Int, LiveJob],
+    val liveExecutors: mutable.HashMap[String, LiveExecutor],
+    val deadExecutors: mutable.HashMap[String, LiveExecutor],
+    val liveTasks: mutable.HashMap[Long, LiveTask],
+    val liveRDDs: mutable.HashMap[Int, LiveRDD],
+    val pools: mutable.HashMap[String, SchedulerPool],
+    val appInfo: v1.ApplicationInfo,
+    val coresPerTask: Int,
+    val activeExecutorCount: Int) {
 
   @JsonIgnore @KVIndex
-  def key: String = appId + "/" + attemptId
-
-  override def toString: String = {
-    s"AppStatusListenerData $appId $attemptId ${liveStages.toString}, ${liveJobs.toString()}," +
-      s" ${liveExecutors.toString()}," +
-      s" $deadExecutors, $liveTasks, ${liveRDDs.toString()}, $pools, $appInfo" +
-      s", $coresPerTask, $activeExecutorCount"
-  }
-
+  def key: Array[Option[String]] = Array(Some(appId), attemptId)
 }
 /**
  * A class with information about an app, to be used by the UI. There's only one instance of
@@ -479,9 +472,6 @@ private[spark] class AppSummary(
     val numCompletedJobs: Int,
     val numCompletedStages: Int) {
 
-  override def toString: String = {
-    s" app summary $numCompletedJobs and $numCompletedStages"
-  }
   @KVIndex
   def id: String = classOf[AppSummary].getName()
 

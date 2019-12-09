@@ -90,7 +90,6 @@ private[spark] class ReplayListenerBus extends SparkListenerBus with Logging {
 
           currentLine = entry._1
           lineNumber = entry._2 + 1
-          logError(s"current entry is ${currentLine} and line is ${lineNumber}\n")
           postToAll(JsonProtocol.sparkEventFromJson(parse(currentLine)))
           lastLine = entry._2
         } catch {

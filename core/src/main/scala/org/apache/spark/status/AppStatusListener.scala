@@ -48,10 +48,10 @@ private[spark] class AppStatusListener(
     lastUpdateTime: Option[Long] = None) extends SparkListener with Logging {
 
   private var sparkVersion = SPARK_VERSION
-  private var appInfo: v1.ApplicationInfo = _
+  private var appInfo: v1.ApplicationInfo = null
   private var appSummary = new AppSummary(0, 0)
   private var coresPerTask: Int = 1
-  private var appId: String = ""
+  private var appId: String = _
   private var attemptId: Option[String] = None
 
   // How often to update live entities. -1 means "never update" when replaying applications,
@@ -70,7 +70,7 @@ private[spark] class AppStatusListener(
 
   // Keep track of live entities, so that task metrics can be efficiently updated (without
   // causing too many writes to the underlying store, and other expensive operations).
-  private var liveStages = new ConcurrentHashMap[(Int, Int), LiveStage]()
+  private val liveStages = new ConcurrentHashMap[(Int, Int), LiveStage]()
   private val liveJobs = new HashMap[Int, LiveJob]()
   private val liveExecutors = new HashMap[String, LiveExecutor]()
   private val deadExecutors = new HashMap[String, LiveExecutor]()
@@ -101,43 +101,40 @@ private[spark] class AppStatusListener(
     if (!live) {
       val now = System.nanoTime()
       flush(update(_, now))
-      if (conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+      if (appId != null) {
         val data = new AppStatusListenerData(appId, attemptId, liveStages, liveJobs,
           liveExecutors, deadExecutors, liveTasks, liveRDDs,
           pools, appInfo, coresPerTask, activeExecutorCount)
-        logError(s"data is ${data.toString}")
-
         kvstore.write(data)
       }
     }
   }
 
   def initialize(appId: String, attemptId: Option[String]): Unit = {
-    if (!live && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+    if (!live) {
       this.appId = appId
       this.attemptId = attemptId
       try {
-        val listenerData = kvstore.read(classOf[AppStatusListenerData], appId + "/" + attemptId)
-        listenerData.liveStages.entrySet().asScala.foreach(x =>
-          liveStages.put(x.getKey, x.getValue))
-        listenerData.liveJobs.map(x => liveJobs.put(x._1, x._2))
-        listenerData.liveExecutors.map(x => liveExecutors.put(x._1, x._2))
-        listenerData.deadExecutors.map(x => deadExecutors.put(x._1, x._2))
-        listenerData.liveTasks.map(x => liveTasks.put(x._1, x._2))
-        listenerData.liveRDDs.map(x => liveRDDs.put(x._1, x._2))
-        listenerData.pools.map(x => pools.put(x._1, x._2))
+        val listenerData = kvstore.read(classOf[AppStatusListenerData],
+          Array(Some(appId), attemptId))
+        listenerData.liveStages.entrySet().asScala.foreach { entry =>
+          liveStages.put(entry.getKey, entry.getValue)
+        }
+        listenerData.liveJobs.map(entry => liveJobs.put(entry._1, entry._2))
+        listenerData.liveExecutors.map(entry => liveExecutors.put(entry._1, entry._2))
+        listenerData.deadExecutors.map(entry => deadExecutors.put(entry._1, entry._2))
+        listenerData.liveTasks.map(entry => liveTasks.put(entry._1, entry._2))
+        listenerData.liveRDDs.map(entry => liveRDDs.put(entry._1, entry._2))
+        listenerData.pools.map(entry => pools.put(entry._1, entry._2))
         appInfo = listenerData.appInfo
         appSummary = kvstore.read(classOf[AppSummary], classOf[AppSummary].getName())
         coresPerTask = listenerData.coresPerTask
         activeExecutorCount = listenerData.activeExecutorCount
-        logError(s"appId is $appId and attempt is $attemptId")
       } catch {
-        case e: Exception =>
-          logError("Fail to read")
-      }
-
+        case _: NoSuchElementException =>
       }
     }
+  }
 
   override def onOtherEvent(event: SparkListenerEvent): Unit = event match {
     case SparkListenerLogStart(version) => sparkVersion = version
@@ -1131,8 +1128,6 @@ private[spark] class AppStatusListener(
   private def liveUpdate(entity: LiveEntity, now: Long): Unit = {
     if (live) {
       update(entity, now)
-    } else {
-      val x= "do nothing"
     }
   }
 

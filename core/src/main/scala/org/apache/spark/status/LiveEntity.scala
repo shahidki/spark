@@ -17,14 +17,14 @@
 
 package org.apache.spark.status
 
-import java.util
 import java.util.Date
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.immutable.{HashSet, TreeSet}
 import scala.collection.mutable.HashMap
+
 import com.google.common.collect.Interners
+
 import org.apache.spark.JobExecutionStatus
 import org.apache.spark.executor.{ExecutorMetrics, TaskMetrics}
 import org.apache.spark.resource.ResourceInformation
@@ -34,8 +34,6 @@ import org.apache.spark.storage.{RDDInfo, StorageLevel}
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.AccumulatorContext
 import org.apache.spark.util.collection.OpenHashSet
-
-import scala.collection.mutable
 
 /**
  * A mutable representation of a live entity in Spark (jobs, stages, tasks, et al). Every live

@@ -65,7 +65,7 @@ import org.apache.spark.util.kvstore._
  *
  * - New attempts are detected in [[checkForLogs]]: the log dir is scanned, and any entries in the
  * log dir whose size changed since the last scan time are considered new or updated. These are
- * replayed to create a new attempt info entry and update or create a matching application info
+ * replayed to create a new attempt maybeIncrimentInfo entry and update or create a matching application maybeIncrimentInfo
  * element in the list of applications.
  * - Updated attempts are also found in [[checkForLogs]] -- if the attempt's log file has grown, the
  * attempt is replaced by another one with a larger log size.
@@ -617,11 +617,15 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
           val maybeUI = synchronized {
             activeUIs.remove(appId -> attemptId)
           }
-          listing.delete(classOf[IncrimentInfo], appId + "/" + attemptId)
+
           maybeUI.foreach { ui =>
             ui.invalidate()
             ui.ui.store.close()
           }
+
+         if (isIncrementalParsingEnabled) {
+           listing.delete(classOf[IncrimentInfo], Array(Some(appId), attemptId))
+         }
           diskManager.foreach(_.release(appId, attemptId, delete = true))
           true
         }
@@ -954,7 +958,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       store: KVStore,
       reader: EventLogFileReader,
       lastUpdated: Long,
-      info: Option[IncrimentInfo] = None): Unit = {
+      maybeIncrimentInfo: Option[IncrimentInfo] = None): Unit = {
     // Disable async updates, since they cause higher memory usage, and it's ok to take longer
     // to parse the event logs in the SHS.
     val replayConf = conf.clone().set(ASYNC_TRACKING_ENABLED, false)
@@ -962,24 +966,23 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val replayBus = new ReplayListenerBus()
     val listener = new AppStatusListener(trackingStore, replayConf, false,
       lastUpdateTime = Some(lastUpdated))
-    if (info.isDefined) {
-      listener.initialize(info.get.appId, info.get.attemptId)
+    if (maybeIncrimentInfo.isDefined) {
+
     }
+    maybeIncrimentInfo.foreach(info => listener.initialize(info.appId, info.attemptId))
     replayBus.addListener(listener)
 
     for {
       plugin <- loadPlugins()
       listener <- plugin.createListeners(conf, trackingStore)
     } {
-      if (info.isDefined) {
-        plugin.initialize(listener, info.get.appId, info.get.attemptId)
-      }
+      maybeIncrimentInfo.foreach(info => plugin.initialize(listener, info.appId, info.attemptId))
       replayBus.addListener(listener)
     }
 
     try {
       logInfo(s"Parsing ${reader.rootPath} to re-build UI...")
-      parseAppEventLogs(reader.listEventLogFiles, replayBus, !reader.completed, info)
+      parseAppEventLogs(reader.listEventLogFiles, replayBus, !reader.completed, maybeIncrimentInfo)
       trackingStore.close(false)
       logInfo(s"Finished parsing ${reader.rootPath}")
     } catch {
@@ -999,31 +1002,25 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       eventsFilter: ReplayEventsFilter = SELECT_ALL_FILTER): Unit = {
     // stop replaying next log files if ReplayListenerBus indicates some error or halt
     var continueReplay = true
-    var lineToSkip = if (info.isDefined) {
-      info.get.lineToSkip
-    } else -1
-    val fileIndex = if (info.isDefined) {
-      info.get.fileIndex
-    } else 0
-    var index = 0
+    var lineToSkip = info.map(_.lineToSkip).getOrElse(-1)
+    val fileToStart = info.map(_.fileIndex).getOrElse(0)
+    var fileIndex = 0
     logFiles.foreach { file =>
-      if (continueReplay && index >= fileIndex) {
+      if (continueReplay && fileIndex >= fileToStart) {
         Utils.tryWithResource(EventLogFileReader.openEventLog(file.getPath, fs)) { in =>
           val result = replayBus.replay(in, file.getPath.toString,
             maybeTruncated = maybeTruncated, eventsFilter = eventsFilter, lineToSkip)
           continueReplay = result.success
-          if (info.isDefined) {
-            lineToSkip = result.linesRead
+          lineToSkip = -1
+          if (info.isDefined && (!continueReplay || fileIndex >= logFiles.size -1)) {
+            info.get.copy(fileIndex = fileIndex, lineToSkip = result.linesRead)
+            listing.write(info.get)
           }
         }
+        if (info.isDefined) {
+          fileIndex += 1
+        }
       }
-      if (continueReplay) {
-        index += 1
-      }
-    }
-      if (info.isDefined && isIncrementalParsingEnabled) {
-        info.get.copy(fileIndex = index, lineToSkip = lineToSkip)
-        listing.write(info.get)
     }
   }
 
@@ -1130,7 +1127,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
 
   private def createInMemoryStore(appId: String, attempt: AttemptInfoWrapper): KVStore = {
     val store = if (isIncrementalParsingEnabled) {
-      storeMap.getOrDefault((appId, attempt.info.attemptId), new InMemoryStore())
+      storeMap.getOrDefault(appId -> attempt.info.attemptId, new InMemoryStore())
     } else {
       new InMemoryStore
     }
@@ -1138,7 +1135,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       attempt.lastIndex)
     val info: Option[IncrimentInfo] = try {
       if (isIncrementalParsingEnabled) {
-        Some(listing.read(classOf[IncrimentInfo], appId + "/" + attempt.info.attemptId))
+        Some(listing.read(classOf[IncrimentInfo], Array(Some(appId), attempt.info.attemptId)))
       } else None
     } catch {
       case _: Exception =>
@@ -1146,10 +1143,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
         listing.write(info)
         Some(info)
     }
-    rebuildAppStore(store, reader,
-     attempt.info.lastUpdated.getTime(), info)
+    rebuildAppStore(store, reader, attempt.info.lastUpdated.getTime(), info)
     if (isIncrementalParsingEnabled) {
-      storeMap.put((appId, attempt.info.attemptId), store)
+      storeMap.put(appId -> attempt.info.attemptId, store)
     }
     store
   }
@@ -1210,7 +1206,7 @@ private[history] object LogType extends Enumeration {
 }
 
 /**
- * Tracking info for event logs detected in the configured log directory. Tracks both valid and
+ * Tracking maybeIncrimentInfo for event logs detected in the configured log directory. Tracks both valid and
  * invalid logs (e.g. unparseable logs, recorded as logs with no app ID) so that the cleaner
  * can know what log files are safe to delete.
  */
@@ -1226,12 +1222,12 @@ private[history] case class LogInfo(
     isComplete: Boolean)
 
 private[history] case class IncrimentInfo(
-    val appId: String,
-    val attemptId: Option[String],
+    appId: String,
+    attemptId: Option[String],
     fileIndex: Int,
     lineToSkip: Int) {
-  @JsonIgnore @KVIndexParam
-  def id: String = appId + "/" + attemptId
+  @JsonIgnore @KVIndex
+  private def stage: Array[Option[String]] = Array(Some(appId), attemptId)
 }
 
 private[history] class AttemptInfoWrapper(
