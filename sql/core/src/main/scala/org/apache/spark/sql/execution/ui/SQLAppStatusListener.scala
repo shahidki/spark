@@ -22,9 +22,9 @@ import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
+
 import org.apache.spark.{JobExecutionStatus, SparkConf}
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.History
 import org.apache.spark.internal.config.Status._
 import org.apache.spark.scheduler._
 import org.apache.spark.sql.execution.SQLExecution
@@ -43,7 +43,7 @@ class SQLAppStatusListener(
   private val liveUpdatePeriodNs = if (live) conf.get(LIVE_ENTITY_UPDATE_PERIOD) else -1L
 
   private var appId: String = _
-  private var attemptId: Option[String] = _
+  private var attemptId: Option[String] = None
   // Live tracked data is needed by the SQL status store to calculate metrics for in-flight
   // executions; that means arbitrary threads may be querying these maps, so they need to be
   // thread-safe.
@@ -68,7 +68,7 @@ class SQLAppStatusListener(
         // away.
         exec.metricsValues = aggregateMetrics(exec)
         exec.write(kvstore, now)
-        if (conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+        if (appId != null) {
           kvstore.write(new SQLAppStatusListenerData(appId, attemptId,
             liveExecutions, stageMetrics))
         }
@@ -77,19 +77,21 @@ class SQLAppStatusListener(
   }
 
   def initialize(appId: String, attemptId: Option[String]): Unit = {
-    if (!live && conf.get(History.INCREMENTAL_PARSING_ENABLED)) {
+    if (!live) {
       this.appId = appId
       this.attemptId = attemptId
       try {
-        val mapData = kvstore.read(classOf[SQLAppStatusListenerData], appId + "/" + attemptId)
-        mapData.liveExecutions.entrySet().asScala.foreach(x =>
-          liveExecutions.put(x.getKey, x.getValue))
-        mapData.stageMetrics.entrySet().asScala.foreach(x => stageMetrics.put(x.getKey, x.getValue))
+        val listenerData = kvstore.read(classOf[SQLAppStatusListenerData],
+          Array(Some(appId), attemptId))
+        listenerData.liveExecutions.entrySet().asScala.foreach { entry =>
+          liveExecutions.put(entry.getKey, entry.getValue)
+        }
+        listenerData.stageMetrics.entrySet().asScala.foreach { entry =>
+          stageMetrics.put(entry.getKey, entry.getValue)
+        }
       } catch {
-        case e: NoSuchElementException =>
-
+        case _: NoSuchElementException =>
       }
-
     }
   }
 
@@ -427,7 +429,7 @@ class SQLAppStatusListener(
 
 }
 
-private[spark] class LiveExecutionData(val executionId: Long) extends LiveEntity {
+private[ui] class LiveExecutionData(val executionId: Long) extends LiveEntity {
 
   var description: String = null
   var details: String = null
@@ -462,7 +464,7 @@ private[spark] class LiveExecutionData(val executionId: Long) extends LiveEntity
 
 }
 
-private[spark] class LiveStageMetrics(
+private[ui] class LiveStageMetrics(
     val attemptId: Int,
     val numTasks: Int,
     val accumulatorIds: Set[Long]) {

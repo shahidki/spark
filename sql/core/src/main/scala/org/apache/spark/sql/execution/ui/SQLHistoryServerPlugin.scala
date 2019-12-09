@@ -34,8 +34,10 @@ class SQLHistoryServerPlugin extends AppHistoryServerPlugin {
     }
   }
 
-  override def initialize(sparkListener: SparkListener, appId: String,
-                          attemptId: Option[String]): Unit = {
+  override def initialize(
+      sparkListener: SparkListener,
+      appId: String,
+      attemptId: Option[String]): Unit = {
     sparkListener.asInstanceOf[SQLAppStatusListener].initialize(appId, attemptId)
   }
 

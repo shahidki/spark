@@ -18,19 +18,19 @@
 package org.apache.spark.status
 
 import java.lang.{Long => JLong}
-import java.util
 import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
 
+import scala.collection.mutable
+
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+
 import org.apache.spark.status.KVUtils._
 import org.apache.spark.status.api.v1
 import org.apache.spark.status.api.v1._
 import org.apache.spark.ui.scope._
 import org.apache.spark.util.kvstore.KVIndex
-
-import scala.collection.mutable
 
 private[spark] case class AppStatusStoreMetadata(version: Long)
 
@@ -461,7 +461,7 @@ private[spark] class AppStatusListenerData(
     val coresPerTask: Int,
     val activeExecutorCount: Int) {
 
-  @JsonIgnore @KVIndex
+  @KVIndex @JsonIgnore
   def key: Array[Option[String]] = Array(Some(appId), attemptId)
 }
 /**

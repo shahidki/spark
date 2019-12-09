@@ -28,8 +28,10 @@ class HiveThriftServer2HistoryServerPlugin extends AppHistoryServerPlugin {
     Seq(new HiveThriftServer2Listener(store, conf, None, false))
   }
 
-  override def initialize(sparkListener: SparkListener, appId: String,
-                          attemptId: Option[String]): Unit = {
+  override def initialize(
+      sparkListener: SparkListener,
+      appId: String,
+      attemptId: Option[String]): Unit = {
     sparkListener.asInstanceOf[HiveThriftServer2Listener].initialize(appId, attemptId)
   }
   override def setupUI(ui: SparkUI): Unit = {

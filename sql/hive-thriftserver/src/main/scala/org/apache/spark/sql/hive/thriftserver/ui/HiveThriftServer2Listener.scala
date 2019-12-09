@@ -21,8 +21,9 @@ import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ArrayBuffer
+
 import org.apache.hive.service.server.HiveServer2
-import org.apache.spark.internal.config.History
+
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.internal.config.Status.LIVE_ENTITY_UPDATE_PERIOD
 import org.apache.spark.scheduler._
@@ -43,24 +44,7 @@ private[thriftserver] class HiveThriftServer2Listener(
   private val executionList = new ConcurrentHashMap[String, LiveExecutionData]()
 
   private var appId: String = _
-  private var attemptId: Option[String] = _
-
-  def initialize(appId: String, attemptId: Option[String]): Unit = {
-    if (!live && sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-      this.appId = appId
-      this.attemptId = attemptId
-      try {
-        val listenerData = kvstore.read(classOf[HiveThriftserver2ListenerData], appId)
-        listenerData.executionList.entrySet().asScala.foreach(x =>
-          executionList.put(x.getKey, x.getValue))
-        listenerData.sessionList.entrySet().asScala.foreach(x =>
-          sessionList.put(x.getKey, x.getValue))
-      } catch {
-        case e: Exception =>
-
-      }
-    }
-  }
+  private var attemptId: Option[String] = None
 
   private val (retainedStatements: Int, retainedSessions: Int) = {
     (sparkConf.get(SQLConf.THRIFTSERVER_UI_STATEMENT_LIMIT),
@@ -88,8 +72,28 @@ private[thriftserver] class HiveThriftServer2Listener(
   kvstore.onFlush {
     if (!live) {
       flush((entity: LiveEntity) => updateStoreWithTriggerEnabled(entity))
-      if (sparkConf.get(History.INCREMENTAL_PARSING_ENABLED)) {
-        kvstore.write(new HiveThriftserver2ListenerData(appId, attemptId, sessionList, executionList))
+      if (appId != null) {
+        kvstore.write(new HiveThriftserver2ListenerData(
+          appId, attemptId, sessionList, executionList))
+      }
+    }
+  }
+
+  def initialize(appId: String, attemptId: Option[String]): Unit = {
+    if (!live) {
+      this.appId = appId
+      this.attemptId = attemptId
+      try {
+        val listenerData = kvstore.read(classOf[HiveThriftserver2ListenerData],
+          Array(Some(appId), attemptId))
+        listenerData.executionList.entrySet().asScala.foreach { entry =>
+          executionList.put(entry.getKey, entry.getValue)
+        }
+        listenerData.sessionList.entrySet().asScala.foreach { entry =>
+          sessionList.put(entry.getKey, entry.getValue)
+        }
+      } catch {
+        case _: NoSuchElementException =>
       }
     }
   }
@@ -227,7 +231,6 @@ private[thriftserver] class HiveThriftServer2Listener(
   private def flush(entityFlushFunc: LiveEntity => Unit): Unit = {
     sessionList.values.asScala.foreach(entityFlushFunc)
     executionList.values.asScala.foreach(entityFlushFunc)
-
   }
 
   private def getOrCreateSession(

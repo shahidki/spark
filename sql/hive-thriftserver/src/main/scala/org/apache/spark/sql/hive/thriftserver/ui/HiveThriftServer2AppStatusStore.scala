@@ -134,11 +134,10 @@ private[thriftserver] class ExecutionInfo(
 }
 
 class HiveThriftserver2ListenerData(
-              val appId: String,
-              val attemptId: Option[String],
-              val sessionList: ConcurrentHashMap[String, LiveSessionData],
-              val executionList: ConcurrentHashMap[String, LiveExecutionData]
-              ) {
-  @JsonIgnore @KVIndex
-  def key: String = appId + "/" + attemptId
+    val appId: String,
+    val attemptId: Option[String],
+    val sessionList: ConcurrentHashMap[String, LiveSessionData],
+    val executionList: ConcurrentHashMap[String, LiveExecutionData]) {
+  @KVIndex @JsonIgnore
+  def key: Array[Option[String]] = Array(Some(appId), attemptId)
 }

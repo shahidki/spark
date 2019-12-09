@@ -20,7 +20,7 @@ package org.apache.spark.deploy.history
 import java.io.{File, FileNotFoundException, IOException}
 import java.lang.{Long => JLong}
 import java.nio.file.Files
-import java.util.{Date, NoSuchElementException, ServiceLoader}
+import java.util.{Date, ServiceLoader}
 import java.util.concurrent.{ConcurrentHashMap, ExecutorService, Future, TimeUnit}
 import java.util.zip.ZipOutputStream
 
@@ -50,7 +50,7 @@ import org.apache.spark.internal.config.UI._
 import org.apache.spark.scheduler._
 import org.apache.spark.scheduler.ReplayListenerBus._
 import org.apache.spark.status._
-import org.apache.spark.status.KVUtils.{KVIndexParam, _}
+import org.apache.spark.status.KVUtils._
 import org.apache.spark.status.api.v1.{ApplicationAttemptInfo, ApplicationInfo}
 import org.apache.spark.ui.SparkUI
 import org.apache.spark.util.{Clock, SystemClock, ThreadUtils, Utils}
@@ -65,7 +65,7 @@ import org.apache.spark.util.kvstore._
  *
  * - New attempts are detected in [[checkForLogs]]: the log dir is scanned, and any entries in the
  * log dir whose size changed since the last scan time are considered new or updated. These are
- * replayed to create a new attempt maybeIncrimentInfo entry and update or create a matching application maybeIncrimentInfo
+ * replayed to create a new attempt info entry and update or create a matching application info
  * element in the list of applications.
  * - Updated attempts are also found in [[checkForLogs]] -- if the attempt's log file has grown, the
  * attempt is replaced by another one with a larger log size.
@@ -958,7 +958,7 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
       store: KVStore,
       reader: EventLogFileReader,
       lastUpdated: Long,
-      maybeIncrimentInfo: Option[IncrimentInfo] = None): Unit = {
+      incrimentInfo: Option[IncrimentInfo] = None): Unit = {
     // Disable async updates, since they cause higher memory usage, and it's ok to take longer
     // to parse the event logs in the SHS.
     val replayConf = conf.clone().set(ASYNC_TRACKING_ENABLED, false)
@@ -966,23 +966,21 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
     val replayBus = new ReplayListenerBus()
     val listener = new AppStatusListener(trackingStore, replayConf, false,
       lastUpdateTime = Some(lastUpdated))
-    if (maybeIncrimentInfo.isDefined) {
 
-    }
-    maybeIncrimentInfo.foreach(info => listener.initialize(info.appId, info.attemptId))
+    incrimentInfo.foreach(info => listener.initialize(info.appId, info.attemptId))
     replayBus.addListener(listener)
 
     for {
       plugin <- loadPlugins()
       listener <- plugin.createListeners(conf, trackingStore)
     } {
-      maybeIncrimentInfo.foreach(info => plugin.initialize(listener, info.appId, info.attemptId))
+      incrimentInfo.foreach(info => plugin.initialize(listener, info.appId, info.attemptId))
       replayBus.addListener(listener)
     }
 
     try {
       logInfo(s"Parsing ${reader.rootPath} to re-build UI...")
-      parseAppEventLogs(reader.listEventLogFiles, replayBus, !reader.completed, maybeIncrimentInfo)
+      parseAppEventLogs(reader.listEventLogFiles, replayBus, !reader.completed, incrimentInfo)
       trackingStore.close(false)
       logInfo(s"Finished parsing ${reader.rootPath}")
     } catch {
@@ -1086,9 +1084,9 @@ private[history] class FsHistoryProvider(conf: SparkConf, clock: Clock)
   }
 
   private def loadDiskStore(
-                             dm: HistoryServerDiskManager,
-                             appId: String,
-                             attempt: AttemptInfoWrapper): KVStore = {
+      dm: HistoryServerDiskManager,
+      appId: String,
+      attempt: AttemptInfoWrapper): KVStore = {
     val metadata = new AppStatusStoreMetadata(AppStatusStore.CURRENT_VERSION)
 
     // First check if the store already exists and try to open it. If that fails, then get rid of
@@ -1206,7 +1204,7 @@ private[history] object LogType extends Enumeration {
 }
 
 /**
- * Tracking maybeIncrimentInfo for event logs detected in the configured log directory. Tracks both valid and
+ * Tracking info for event logs detected in the configured log directory. Tracks both valid and
  * invalid logs (e.g. unparseable logs, recorded as logs with no app ID) so that the cleaner
  * can know what log files are safe to delete.
  */

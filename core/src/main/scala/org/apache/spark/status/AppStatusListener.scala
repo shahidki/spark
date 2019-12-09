@@ -17,7 +17,7 @@
 
 package org.apache.spark.status
 
-import java.util.{Date, NoSuchElementException}
+import java.util.Date
 import java.util.concurrent.ConcurrentHashMap
 
 import scala.collection.JavaConverters._
@@ -25,7 +25,7 @@ import scala.collection.mutable.HashMap
 import org.apache.spark._
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.internal.Logging
-import org.apache.spark.internal.config.{CPUS_PER_TASK, History}
+import org.apache.spark.internal.config.CPUS_PER_TASK
 import org.apache.spark.internal.config.Status._
 import org.apache.spark.scheduler._
 import org.apache.spark.status.api.v1
@@ -120,12 +120,12 @@ private[spark] class AppStatusListener(
         listenerData.liveStages.entrySet().asScala.foreach { entry =>
           liveStages.put(entry.getKey, entry.getValue)
         }
-        listenerData.liveJobs.map(entry => liveJobs.put(entry._1, entry._2))
-        listenerData.liveExecutors.map(entry => liveExecutors.put(entry._1, entry._2))
-        listenerData.deadExecutors.map(entry => deadExecutors.put(entry._1, entry._2))
-        listenerData.liveTasks.map(entry => liveTasks.put(entry._1, entry._2))
-        listenerData.liveRDDs.map(entry => liveRDDs.put(entry._1, entry._2))
-        listenerData.pools.map(entry => pools.put(entry._1, entry._2))
+        listenerData.liveJobs.map{entry => liveJobs.put(entry._1, entry._2)}
+        listenerData.liveExecutors.map{entry => liveExecutors.put(entry._1, entry._2)}
+        listenerData.deadExecutors.map{entry => deadExecutors.put(entry._1, entry._2)}
+        listenerData.liveTasks.map{entry => liveTasks.put(entry._1, entry._2)}
+        listenerData.liveRDDs.map{entry => liveRDDs.put(entry._1, entry._2)}
+        listenerData.pools.map{entry => pools.put(entry._1, entry._2)}
         appInfo = listenerData.appInfo
         appSummary = kvstore.read(classOf[AppSummary], classOf[AppSummary].getName())
         coresPerTask = listenerData.coresPerTask
